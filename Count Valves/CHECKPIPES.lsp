@@ -220,11 +220,14 @@
   (write-line "  }" f)
   (write-line "  spacer;" f)
   (write-line "  : row {" f)
-  (write-line "    : button { key = \"zoom_btn\"; label = \"Zoom To\"; width = 15; }" f)
-  (write-line "    : button { key = \"fix_btn\"; label = \"Fix Pipe\"; width = 15; }" f)
-  (write-line "    : button { key = \"rescan_btn\"; label = \"New Selection\"; width = 15; }" f)
-  (write-line "    : spacer { width = 5; }" f)
-  (write-line "    : button { key = \"close_btn\"; label = \"Close\"; width = 15; is_cancel = true; }" f)
+  (write-line "    : button { key = \"zoom_btn\";       label = \"Zoom To\";         width = 14; }" f)
+  (write-line "    : button { key = \"fix_btn\";        label = \"Fix Pipe\";        width = 14; }" f)
+  (write-line "    : button { key = \"fix_trans_btn\";  label = \"Fix Transition\";  width = 16; }" f)
+  (write-line "  }" f)
+  (write-line "  : row {" f)
+  (write-line "    : button { key = \"rescan_btn\"; label = \"New Selection\"; width = 16; }" f)
+  (write-line "    : spacer { width = 12; }" f)
+  (write-line "    : button { key = \"close_btn\"; label = \"Close\"; width = 14; is_cancel = true; }" f)
   (write-line "  }" f)
   (write-line "}" f)
   (close f)
@@ -247,8 +250,9 @@
   (setq *DLG-SEL-IDX* sel-idx)
   (action_tile "problem_list" "(setq *DLG-SEL-IDX* (atoi $value)) (if (= $reason 4) (done_dialog 2))")
   (action_tile "zoom_btn"     "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 2)")
-  (action_tile "fix_btn"      "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 4)")
-  (action_tile "rescan_btn"   "(done_dialog 3)")
+  (action_tile "fix_btn"       "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 4)")
+  (action_tile "fix_trans_btn" "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 5)")
+  (action_tile "rescan_btn"    "(done_dialog 3)")
   (action_tile "close_btn"    "(done_dialog 0)")
   (setq done (start_dialog))
   (unload_dialog dcl-id)
@@ -392,6 +396,107 @@
   )
 )
 
+;;; Copy mainline XDATA onto transition pipe (pipe between SOV and mainline).
+;;; Like fix-pipe-xdata but preserves size (nth 2) and display name (nth 5)
+;;; from the bad pipe so the result is a mainline pipe at the lateral diameter.
+;;; Also skips Ds: (design size) from the mainline template.
+(defun fix-transition-pipe-xdata (bad-ent / bad-ed bad-xd bad-strings bad-handles
+                                             src-ent src-xd new-pairs pair
+                                             str-idx preserved-size preserved-display)
+  (setq bad-xd           (get-lafx-xd bad-ent))
+  (setq bad-strings      (xd-strings bad-xd))
+  (setq bad-handles      (get-handles bad-xd))
+  (setq preserved-size   (if (>= (length bad-strings) 3) (nth 2 bad-strings) nil))
+  (setq preserved-display (if (>= (length bad-strings) 6) (nth 5 bad-strings) nil))
+  (setq src-ent          (find-source-mainline bad-ent))
+  (if (null src-ent)
+    (progn (princ "\n  Could not find connected mainline pipe - skipping.") nil)
+    (progn
+      (setq src-xd (get-lafx-xd src-ent))
+      (if (null src-xd)
+        (progn (princ "\n  Source pipe has no LandFX XDATA - skipping.") nil)
+        (progn
+          (setq new-pairs '())
+          (setq str-idx 0)
+          (foreach pair (cdr src-xd)
+            (cond
+              ;; Skip handles - bad pipe's own handles appended later
+              ((= (car pair) 1005) nil)
+              ;; String entries - track index carefully
+              ((= (car pair) 1000)
+               (cond
+                 ;; Skip Dp:/Df:/Ds: - position-specific or design specs
+                 ((or (= (substr (cdr pair) 1 3) "Dp:")
+                      (= (substr (cdr pair) 1 3) "Df:")
+                      (= (substr (cdr pair) 1 3) "Ds:"))
+                  (setq str-idx (1+ str-idx))
+                 )
+                 ;; Substitute size (nth 2) from bad pipe
+                 ((and (= str-idx 2) preserved-size)
+                  (setq new-pairs (append new-pairs (list (cons 1000 preserved-size))))
+                  (setq str-idx (1+ str-idx))
+                 )
+                 ;; Substitute display name (nth 5) from bad pipe
+                 ((and (= str-idx 5) preserved-display)
+                  (setq new-pairs (append new-pairs (list (cons 1000 preserved-display))))
+                  (setq str-idx (1+ str-idx))
+                 )
+                 ;; All other strings - copy from mainline template
+                 (T
+                  (setq new-pairs (append new-pairs (list pair)))
+                  (setq str-idx (1+ str-idx))
+                 )
+               )
+              )
+              ;; Non-string, non-handle pairs (1040, 1070, etc.) - copy from source
+              (T (setq new-pairs (append new-pairs (list pair))))
+            )
+          )
+          ;; Append Dp: and Df: from bad pipe if present
+          (foreach pair (cdr bad-xd)
+            (if (and (= (car pair) 1000)
+                     (or (= (substr (cdr pair) 1 3) "Dp:")
+                         (= (substr (cdr pair) 1 3) "Df:")))
+              (setq new-pairs (append new-pairs (list pair)))
+            )
+          )
+          ;; Append bad pipe's own handles
+          (foreach h bad-handles
+            (setq new-pairs (append new-pairs (list (cons 1005 h))))
+          )
+          ;; Write new XDATA
+          (setq bad-ed (entget bad-ent '("LandFX")))
+          (setq bad-ed (vl-remove (assoc -3 bad-ed) bad-ed))
+          (setq bad-ed (append bad-ed (list (cons -3 (list (cons "LandFX" new-pairs))))))
+          ;; Copy layer from source
+          (setq bad-ed (subst
+            (cons 8 (cdr (assoc 8 (entget src-ent))))
+            (assoc 8 bad-ed)
+            bad-ed))
+          ;; Copy entity color from source
+          (setq src-color (assoc 62 (entget src-ent)))
+          (setq bad-color (assoc 62 bad-ed))
+          (cond
+            ((and src-color bad-color)
+             (setq bad-ed (subst src-color bad-color bad-ed)))
+            ((and src-color (not bad-color))
+             (setq bad-ed (append bad-ed (list src-color))))
+            ((and (not src-color) bad-color)
+             (setq bad-ed (vl-remove bad-color bad-ed)))
+          )
+          (entmod bad-ed)
+          (entupd bad-ent)
+          (princ (strcat "\n  Fixed transition pipe from mainline handle:"
+                         (cdr (assoc 5 (entget src-ent)))
+                         " | Size preserved: " (if preserved-size preserved-size "?")
+                         " | Display preserved: " (if preserved-display preserved-display "?")))
+          T
+        )
+      )
+    )
+  )
+)
+
 ;;; ── Main Loop ────────────────────────────────────────────────────────────────
 
 (defun run-check-loop (title ss scan-fn / problems)
@@ -425,6 +530,27 @@
          (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
          (princ (strcat "\nFixing pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
          (if (fix-pipe-xdata sel-ent)
+           (progn
+             (princ "\nRe-scanning...")
+             (setq problems (apply scan-fn (list ss)))
+             (if (= (length problems) 0)
+               (princ "\nAll clear!")
+               (run-check-open title problems ss scan-fn
+                 (min *DLG-SEL-IDX* (1- (length problems))))
+             )
+           )
+         )
+       )
+       (princ "\nNo item selected.")
+     )
+    )
+    ;; Fix Transition Pipe - copy mainline template but preserve size and display name
+    ((= result 5)
+     (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
+       (progn
+         (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
+         (princ (strcat "\nFixing transition pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
+         (if (fix-transition-pipe-xdata sel-ent)
            (progn
              (princ "\nRe-scanning...")
              (setq problems (apply scan-fn (list ss)))
