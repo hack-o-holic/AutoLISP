@@ -85,6 +85,7 @@
       (command "_.ZOOM" "0.5X")
     )
   )
+  (command "_.REDRAW")
   (setq hs (ssadd ent (ssadd)))
   (sssetfirst hs hs)
 )
@@ -220,14 +221,13 @@
   (write-line "  }" f)
   (write-line "  spacer;" f)
   (write-line "  : row {" f)
-  (write-line "    : button { key = \"zoom_btn\";       label = \"Zoom To\";         width = 14; }" f)
-  (write-line "    : button { key = \"fix_btn\";        label = \"Fix Pipe\";        width = 14; }" f)
-  (write-line "    : button { key = \"fix_trans_btn\";  label = \"Fix Transition\";  width = 16; }" f)
-  (write-line "  }" f)
-  (write-line "  : row {" f)
-  (write-line "    : button { key = \"rescan_btn\"; label = \"New Selection\"; width = 16; }" f)
-  (write-line "    : spacer { width = 12; }" f)
-  (write-line "    : button { key = \"close_btn\"; label = \"Close\"; width = 14; is_cancel = true; }" f)
+  (write-line "    : button { key = \"zoom_btn\"; label = \"Zoom To\"; width = 15; }" f)
+  (write-line "    : button { key = \"fix_btn\"; label = \"Fix Pipe\"; width = 15; }" f)
+  (write-line "    : button { key = \"fix_tpl_btn\"; label = \"Fix LAT 02 to MAIN 02\"; width = 22; }" f)
+  (write-line "    : button { key = \"fix_all_btn\"; label = \"Fix All (Template)\"; width = 18; }" f)
+  (write-line "    : button { key = \"rescan_btn\"; label = \"New Selection\"; width = 15; }" f)
+  (write-line "    : spacer { width = 3; }" f)
+  (write-line "    : button { key = \"close_btn\"; label = \"Close\"; width = 15; is_cancel = true; }" f)
   (write-line "  }" f)
   (write-line "}" f)
   (close f)
@@ -250,9 +250,10 @@
   (setq *DLG-SEL-IDX* sel-idx)
   (action_tile "problem_list" "(setq *DLG-SEL-IDX* (atoi $value)) (if (= $reason 4) (done_dialog 2))")
   (action_tile "zoom_btn"     "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 2)")
-  (action_tile "fix_btn"       "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 4)")
-  (action_tile "fix_trans_btn" "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 5)")
-  (action_tile "rescan_btn"    "(done_dialog 3)")
+  (action_tile "fix_btn"      "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 4)")
+  (action_tile "fix_tpl_btn"  "(setq *DLG-SEL-IDX* (atoi (get_tile \"problem_list\"))) (done_dialog 5)")
+  (action_tile "fix_all_btn"  "(done_dialog 6)")
+  (action_tile "rescan_btn"   "(done_dialog 3)")
   (action_tile "close_btn"    "(done_dialog 0)")
   (setq done (start_dialog))
   (unload_dialog dcl-id)
@@ -396,63 +397,35 @@
   )
 )
 
-;;; Copy mainline XDATA onto transition pipe (pipe between SOV and mainline).
-;;; Like fix-pipe-xdata but preserves size (nth 2) and display name (nth 5)
-;;; from the bad pipe so the result is a mainline pipe at the lateral diameter.
-;;; Also skips Ds: (design size) from the mainline template.
-(defun fix-transition-pipe-xdata (bad-ent / bad-ed bad-xd bad-strings bad-handles
-                                             src-ent src-xd new-pairs pair
-                                             str-idx preserved-size preserved-display)
-  (setq bad-xd           (get-lafx-xd bad-ent))
-  (setq bad-strings      (xd-strings bad-xd))
-  (setq bad-handles      (get-handles bad-xd))
-  (setq preserved-size   (if (>= (length bad-strings) 3) (nth 2 bad-strings) nil))
-  (setq preserved-display (if (>= (length bad-strings) 6) (nth 5 bad-strings) nil))
-  (setq src-ent          (find-source-mainline bad-ent))
-  (if (null src-ent)
-    (progn (princ "\n  Could not find connected mainline pipe - skipping.") nil)
+;;; Copy XDATA from the stored template pipe (*FIX-TEMPLATE*) onto bad-ent.
+;;; Same rules as fix-pipe-xdata: copies everything from template except
+;;; handles and Dp:/Df:, then appends bad pipe's Dp:/Df: and its own handles.
+;;; Also copies layer and color from template.
+(defun fix-from-template (bad-ent / bad-ed bad-xd bad-handles
+                                     src-xd src-strings
+                                     new-pairs pair src-color bad-color)
+  (if (null *FIX-TEMPLATE*)
+    (progn (princ "\nNo template set - run SETFIXTEMPLATE first.") nil)
     (progn
-      (setq src-xd (get-lafx-xd src-ent))
+      (setq src-xd (get-lafx-xd *FIX-TEMPLATE*))
       (if (null src-xd)
-        (progn (princ "\n  Source pipe has no LandFX XDATA - skipping.") nil)
+        (progn (princ "\nTemplate pipe no longer valid - run SETFIXTEMPLATE again.") nil)
         (progn
+          (setq bad-xd      (get-lafx-xd bad-ent))
+          (setq bad-handles (get-handles bad-xd))
+          ;; Copy everything from template except handles, Dp:, and Df:
+          ;; Ds: IS copied - it defines the correct design size for this pipe type.
+          ;; Dp:/Df: are not copied - those are per-pipe hydraulic results from sizing.
           (setq new-pairs '())
-          (setq str-idx 0)
           (foreach pair (cdr src-xd)
-            (cond
-              ;; Skip handles - bad pipe's own handles appended later
-              ((= (car pair) 1005) nil)
-              ;; String entries - track index carefully
-              ((= (car pair) 1000)
-               (cond
-                 ;; Skip Dp:/Df:/Ds: - position-specific or design specs
-                 ((or (= (substr (cdr pair) 1 3) "Dp:")
-                      (= (substr (cdr pair) 1 3) "Df:")
-                      (= (substr (cdr pair) 1 3) "Ds:"))
-                  (setq str-idx (1+ str-idx))
-                 )
-                 ;; Substitute size (nth 2) from bad pipe
-                 ((and (= str-idx 2) preserved-size)
-                  (setq new-pairs (append new-pairs (list (cons 1000 preserved-size))))
-                  (setq str-idx (1+ str-idx))
-                 )
-                 ;; Substitute display name (nth 5) from bad pipe
-                 ((and (= str-idx 5) preserved-display)
-                  (setq new-pairs (append new-pairs (list (cons 1000 preserved-display))))
-                  (setq str-idx (1+ str-idx))
-                 )
-                 ;; All other strings - copy from mainline template
-                 (T
-                  (setq new-pairs (append new-pairs (list pair)))
-                  (setq str-idx (1+ str-idx))
-                 )
-               )
-              )
-              ;; Non-string, non-handle pairs (1040, 1070, etc.) - copy from source
-              (T (setq new-pairs (append new-pairs (list pair))))
+            (if (and (not (= (car pair) 1005))
+                     (not (and (= (car pair) 1000)
+                               (or (= (substr (cdr pair) 1 3) "Dp:")
+                                   (= (substr (cdr pair) 1 3) "Df:")))))
+              (setq new-pairs (append new-pairs (list pair)))
             )
           )
-          ;; Append Dp: and Df: from bad pipe if present
+          ;; Preserve Dp:/Df: from bad pipe if present (safety net - unlikely on a bad pipe)
           (foreach pair (cdr bad-xd)
             (if (and (= (car pair) 1000)
                      (or (= (substr (cdr pair) 1 3) "Dp:")
@@ -460,7 +433,7 @@
               (setq new-pairs (append new-pairs (list pair)))
             )
           )
-          ;; Append bad pipe's own handles
+          ;; Use bad pipe's own handles
           (foreach h bad-handles
             (setq new-pairs (append new-pairs (list (cons 1005 h))))
           )
@@ -468,13 +441,13 @@
           (setq bad-ed (entget bad-ent '("LandFX")))
           (setq bad-ed (vl-remove (assoc -3 bad-ed) bad-ed))
           (setq bad-ed (append bad-ed (list (cons -3 (list (cons "LandFX" new-pairs))))))
-          ;; Copy layer from source
+          ;; Copy layer from template
           (setq bad-ed (subst
-            (cons 8 (cdr (assoc 8 (entget src-ent))))
+            (cons 8 (cdr (assoc 8 (entget *FIX-TEMPLATE*))))
             (assoc 8 bad-ed)
             bad-ed))
-          ;; Copy entity color from source
-          (setq src-color (assoc 62 (entget src-ent)))
+          ;; Copy color from template
+          (setq src-color (assoc 62 (entget *FIX-TEMPLATE*)))
           (setq bad-color (assoc 62 bad-ed))
           (cond
             ((and src-color bad-color)
@@ -486,10 +459,10 @@
           )
           (entmod bad-ed)
           (entupd bad-ent)
-          (princ (strcat "\n  Fixed transition pipe from mainline handle:"
-                         (cdr (assoc 5 (entget src-ent)))
-                         " | Size preserved: " (if preserved-size preserved-size "?")
-                         " | Display preserved: " (if preserved-display preserved-display "?")))
+          (setq src-strings (xd-strings src-xd))
+          (princ (strcat "\n  Fixed from template: "
+                         (if (>= (length src-strings) 2) (nth 1 src-strings) "?")
+                         " / " (if (>= (length src-strings) 9) (nth 8 src-strings) "?")))
           T
         )
       )
@@ -508,80 +481,112 @@
   )
 )
 
-(defun run-check-open (title problems ss scan-fn sel-idx / result sel-ent new-ss)
-  (setq result (run-check-dialog
-    (strcat title " - " (itoa (length problems)) " problem(s)")
-    problems sel-idx))
-  (cond
-    ;; Zoom To - zoom then reopen dialog at same position
-    ((= result 2)
-     (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
-       (progn
-         (zoom-to-ent (caddr (nth *DLG-SEL-IDX* problems)))
-         (run-check-open title problems ss scan-fn *DLG-SEL-IDX*)
+(defun run-check-open (title problems ss scan-fn init-idx / result sel-ent new-ss sel-idx fixed-count)
+  (setq sel-idx init-idx)
+  (while (> (length problems) 0)
+    (setq result (run-check-dialog
+      (strcat title " - " (itoa (length problems)) " problem(s)")
+      problems sel-idx))
+    (cond
+      ;; Zoom To - zoom then loop back to reshow dialog at same position
+      ((= result 2)
+       (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
+         (progn
+           (zoom-to-ent (caddr (nth *DLG-SEL-IDX* problems)))
+           (setq sel-idx *DLG-SEL-IDX*)
+         )
+         (princ "\nNo item selected.")
        )
-       (princ "\nNo item selected.")
-     )
-    )
-    ;; Fix Pipe - fix, rescan, reopen at same position, no zoom/highlight
-    ((= result 4)
-     (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
-       (progn
-         (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
-         (princ (strcat "\nFixing pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
-         (if (fix-pipe-xdata sel-ent)
-           (progn
-             (princ "\nRe-scanning...")
-             (setq problems (apply scan-fn (list ss)))
-             (if (= (length problems) 0)
-               (princ "\nAll clear!")
-               (run-check-open title problems ss scan-fn
-                 (min *DLG-SEL-IDX* (1- (length problems))))
+      )
+      ;; Fix Pipe - walk connection graph, rescan, loop
+      ((= result 4)
+       (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
+         (progn
+           (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
+           (princ (strcat "\nFixing pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
+           (if (fix-pipe-xdata sel-ent)
+             (progn
+               (sssetfirst nil nil)
+               (princ "\nRe-scanning...")
+               (setq problems (apply scan-fn (list ss)))
+               (setq sel-idx (min *DLG-SEL-IDX* (max 0 (1- (length problems)))))
+               (if (= (length problems) 0) (princ "\nAll clear!"))
              )
            )
          )
+         (princ "\nNo item selected.")
        )
-       (princ "\nNo item selected.")
-     )
-    )
-    ;; Fix Transition Pipe - copy mainline template but preserve size and display name
-    ((= result 5)
-     (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
-       (progn
-         (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
-         (princ (strcat "\nFixing transition pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
-         (if (fix-transition-pipe-xdata sel-ent)
-           (progn
-             (princ "\nRe-scanning...")
-             (setq problems (apply scan-fn (list ss)))
-             (if (= (length problems) 0)
-               (princ "\nAll clear!")
-               (run-check-open title problems ss scan-fn
-                 (min *DLG-SEL-IDX* (1- (length problems))))
+      )
+      ;; Fix LAT 02 to MAIN 02 - apply template XDATA, rescan, loop
+      ((= result 5)
+       (if (and (>= *DLG-SEL-IDX* 0) (< *DLG-SEL-IDX* (length problems)))
+         (progn
+           (setq sel-ent (caddr (nth *DLG-SEL-IDX* problems)))
+           (princ (strcat "\nApplying template to pipe handle:" (car (nth *DLG-SEL-IDX* problems)) "..."))
+           ;; Unhighlight before fixing so the visual change is visible
+           (sssetfirst nil nil)
+           (if (fix-from-template sel-ent)
+             (progn
+               ;; Redraw so user can see the pipe change before dialog reopens
+               (command "_.REDRAW")
+               (princ "\nRe-scanning...")
+               (setq problems (apply scan-fn (list ss)))
+               (setq sel-idx (min *DLG-SEL-IDX* (max 0 (1- (length problems)))))
+               (if (= (length problems) 0) (princ "\nAll clear!"))
              )
            )
          )
+         (princ "\nNo item selected.")
        )
-       (princ "\nNo item selected.")
-     )
-    )
-    ;; New Selection
-    ((= result 3)
-     (setq *CP-LAST-SS* nil)
-     (setq *CV-LAST-SS* nil)
-     (princ "\nSelect new objects to scan: ")
-     (setq new-ss (ssget))
-     (if new-ss
-       (progn
-         (setq *CP-LAST-SS* new-ss)
-         (setq *CV-LAST-SS* new-ss)
-         (run-check-loop title new-ss scan-fn)
+      )
+      ;; Fix All (Template) - apply template to every problem in the list
+      ((= result 6)
+       (if (null *FIX-TEMPLATE*)
+         (princ "\nNo template set - run SETFIXTEMPLATE first.")
+         (progn
+           (princ (strcat "\nFixing all " (itoa (length problems)) " pipes..."))
+           (sssetfirst nil nil)
+           (setq fixed-count 0)
+           (foreach entry problems
+             (if (fix-from-template (caddr entry))
+               (setq fixed-count (1+ fixed-count))
+             )
+           )
+           (command "_.REDRAW")
+           (princ (strcat "\nFixed " (itoa fixed-count) " of " (itoa (length problems)) ". Re-scanning..."))
+           (setq problems (apply scan-fn (list ss)))
+           (setq sel-idx 0)
+           (if (= (length problems) 0) (princ "\nAll clear!"))
+         )
        )
-       (princ "\nNothing selected.")
-     )
+      )
+      ;; New Selection
+      ((= result 3)
+       (setq *CP-LAST-SS* nil)
+       (setq *CV-LAST-SS* nil)
+       (princ "\nSelect new objects to scan: ")
+       (setq new-ss (ssget))
+       (if new-ss
+         (progn
+           (setq *CP-LAST-SS* new-ss)
+           (setq *CV-LAST-SS* new-ss)
+           (setq ss new-ss)
+           (princ "\nScanning...")
+           (setq problems (apply scan-fn (list ss)))
+           (setq sel-idx 0)
+           (if (= (length problems) 0)
+             (progn (princ "\nNo problems found!") (setq problems nil))
+           )
+         )
+         (progn (princ "\nNothing selected.") (setq problems nil))
+       )
+      )
+      ;; Closed (result 0) or any unrecognised result - exit loop
+      (T
+       (sssetfirst nil nil)
+       (setq problems nil)
+      )
     )
-    ;; Closed
-    ((= result 0) (sssetfirst nil nil))
   )
 )
 
@@ -619,7 +624,40 @@
   (princ)
 )
 
+;;; Pick a correctly drawn pipe to use as the XDATA template for Fix Pipe.
+;;; When a template is set, Fix Pipe copies from it instead of walking the
+;;; connection graph.  Run again to change template; no argument to clear it.
+(defun C:SETFIXTEMPLATE ( / ent xd strings cat)
+  (setq ent (car (entsel "\nSETFIXTEMPLATE - Pick template pipe (Enter to clear): ")))
+  (if ent
+    (progn
+      (setq xd (get-lafx-xd ent))
+      (if xd
+        (progn
+          (setq strings (xd-strings xd))
+          (setq cat (if (>= (length strings) 9) (nth 8 strings) "?"))
+          (setq *FIX-TEMPLATE* ent)
+          (princ (strcat "\nTemplate set: "
+                         (if (>= (length strings) 2) (nth 1 strings) "?")
+                         " | " (if (>= (length strings) 3) (nth 2 strings) "?")
+                         " | " cat))
+        )
+        (progn
+          (princ "\nSelected entity has no LandFX XDATA - not a valid pipe.")
+          (setq *FIX-TEMPLATE* nil)
+        )
+      )
+    )
+    (progn
+      (setq *FIX-TEMPLATE* nil)
+      (princ "\nFix template cleared - Fix Pipe will use connection graph.")
+    )
+  )
+  (princ)
+)
+
 (princ "\nCHECKPIPES + CHECKVALVES loaded.")
-(princ "\n  CHECKPIPES   - find and fix mismatched pipe type/category data")
-(princ "\n  CHECKVALVES  - find lateral SOVs with bad pipe connections")
+(princ "\n  SETFIXTEMPLATE - pick a pipe as XDATA template for Fix Pipe")
+(princ "\n  CHECKPIPES     - find and fix mismatched pipe type/category data")
+(princ "\n  CHECKVALVES    - find lateral SOVs with bad pipe connections")
 (princ)

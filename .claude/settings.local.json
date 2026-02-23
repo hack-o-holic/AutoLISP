@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sc query:*)",
+      "Bash(net start)",
+      "Bash(tasklist:*)",
+      "Bash(reg query \"HKLM\\\\SOFTWARE\\\\ODBC\\\\ODBC.INI\")",
+      "Bash(reg query:*)"
+    ]
+  }
+}
