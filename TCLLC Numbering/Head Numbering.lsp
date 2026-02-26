@@ -712,8 +712,7 @@
       (T               "** Gaps Exist **")
     )
   )
-  (set_tile "num_prefix" (strcat (FormatHoleNumber hole) location))
-  (set_tile "override_num" (FormatNumber next-num))
+  (set_tile "override_num" (strcat (FormatHoleNumber hole) location (FormatNumber next-num)))
   (mode_tile "fill_gaps_btn" (if (> gap-count 0) 0 1))
 )
 
@@ -1360,12 +1359,12 @@
      )"
   )
 
-  ; When list item clicked - set override_num to that number (formatted, e.g. "007")
+  ; When list item clicked - set override_num to full label (e.g. "01FW007")
   (action_tile "tag_list"
     "(setq selected-idx (atoi $value))
      (setq selected-str (nth selected-idx list-items))
      (if selected-str
-       (set_tile \"override_num\" (substr selected-str 5 3))
+       (set_tile \"override_num\" (substr selected-str 1 7))
      )"
   )
 
@@ -1414,7 +1413,11 @@
     (list
       (1+ (atoi hole-choice))
       (nth (atoi location-choice) *HN-Locations*)
-      (atoi chosen-num)  ; captured in accept action before dialog closed
+      ; chosen-num is "01FW022" (full) or just "022" if user typed digits only
+      (if (>= (strlen chosen-num) 5)
+        (atoi (substr chosen-num 5))
+        (atoi chosen-num)
+      )
     )
     nil
   )

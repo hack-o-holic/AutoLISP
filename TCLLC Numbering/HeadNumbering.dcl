@@ -40,12 +40,16 @@ HeadNumDialog : dialog {
       allow_accept = false;
       multiple_select = false;
     }
+  }
 
+  : row {
+    fixed_width = true;
+    alignment = centered;
     : boxed_column {
       label = "Next No.:";
+      fixed_width = true;
       : row {
-        : text { key = "num_prefix"; label = ""; width = 5; }
-        : edit_box { key = "override_num"; width = 5; }
+        : edit_box { key = "override_num"; width = 7; fixed_width = true; }
         : button { key = "clear_num_btn"; label = "Auto"; fixed_width = true; width = 6; }
       }
     }
