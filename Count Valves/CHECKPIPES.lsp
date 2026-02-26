@@ -343,6 +343,174 @@
   results
 )
 
+;;; ── Feeder Traversal ─────────────────────────────────────────────────────────
+
+;;; Convert a size string like "10\"" or "3/4\"" to a float for comparison.
+(defun cv-pipe-size-num (s)
+  (atof (vl-string-subst "" "\"" (if s s "0")))
+)
+
+;;; Walk upstream from a branch main through PIPEFITTING inserts to find the
+;;; trunk (feeder) mainline.  Detection rule: fitting connected to 2+ other
+;;; mainlines = trunk junction; 1 other = intermediate, follow it.  Limit 3 hops.
+;;; Returns the trunk main entity, or nil if not found within 3 hops.
+(defun cv-find-feeder-mainline (branch-main-ent
+                                / current-main hop
+                                  bm-xd bm-handles h conn-ent conn-ed
+                                  fit-xdata fit-handles fh fit-pipe fit-info
+                                  other-mains best-ent best-num this-num
+                                  found-trunk next-hop)
+  (setq current-main branch-main-ent)
+  (setq hop          0)
+  (setq found-trunk  nil)
+  (while (and (< hop 3) (not found-trunk))
+    (setq bm-xd      (get-lafx-xd current-main))
+    (setq bm-handles (if bm-xd (get-handles bm-xd) '()))
+    (setq next-hop   nil)
+    (foreach h bm-handles
+      (if (not found-trunk)
+        (progn
+          (setq conn-ent (handent h))
+          (if (and conn-ent (not (equal conn-ent current-main)))
+            (progn
+              (setq conn-ed (entget conn-ent))
+              (if (and (= (cdr (assoc 0 conn-ed)) "INSERT")
+                       (vl-string-search "PIPEFITTING" (cdr (assoc 2 conn-ed))))
+                (progn
+                  (setq fit-xdata
+                    (cdr (cadr (assoc -3 (entget conn-ent '("LandFX"))))))
+                  (setq fit-handles '())
+                  (if fit-xdata
+                    (foreach pair fit-xdata
+                      (if (= (car pair) 1005)
+                        (setq fit-handles (append fit-handles (list (cdr pair)))))))
+                  (setq other-mains '())
+                  (foreach fh fit-handles
+                    (setq fit-pipe (handent fh))
+                    (if (and fit-pipe (not (equal fit-pipe current-main)))
+                      (progn
+                        (setq fit-info (get-pipe-info fit-pipe))
+                        (if (and fit-info (vl-string-search "pipe-main" (cadr fit-info)))
+                          (setq other-mains (append other-mains (list fit-pipe)))))))
+                  (cond
+                    ((>= (length other-mains) 2)
+                     (setq best-ent nil)
+                     (setq best-num 0.0)
+                     (foreach m other-mains
+                       (setq this-num (cv-pipe-size-num (car (get-pipe-info m))))
+                       (if (> this-num best-num)
+                         (progn (setq best-ent m) (setq best-num this-num))))
+                     (setq found-trunk best-ent))
+                    ((= (length other-mains) 1)
+                     (if (not next-hop) (setq next-hop (car other-mains))))
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (if (and (not found-trunk) next-hop)
+      (progn (setq current-main next-hop) (setq hop (1+ hop)))
+      (setq hop 3)
+    )
+  )
+  found-trunk
+)
+
+;;; Scan for lateral SOVs whose branch main does not connect to a feeder/trunk.
+;;; Only checks valves with exactly 1 lateral + 1 main (connection check passes).
+;;; Returns a list of (handle desc ename detail) for each unpiped valve.
+(defun scan-valve-feeders (ss / i ename entdata xd strings bname vtype
+                               handles pipeent pinfo cat
+                               lat-pipes main-pipes
+                               lat-size main-size branch-main-ent feeder-ent
+                               results desc detail)
+  (setq results '())
+  (setq i 0)
+  (while (< i (sslength ss))
+    (setq ename   (ssname ss i))
+    (setq entdata (entget ename))
+    (setq xd      (get-lafx-xd ename))
+    (if (and xd (= (cdr (assoc 0 entdata)) "INSERT"))
+      (progn
+        (setq strings (xd-strings xd))
+        (setq bname   (cdr (assoc 2 entdata)))
+        (setq vtype   (classify-valve strings bname))
+        (if (= vtype "LATERAL-SOV")
+          (progn
+            (setq handles    (get-handles xd))
+            (setq lat-pipes  '())
+            (setq main-pipes '())
+            (foreach h handles
+              (setq pipeent (handent h))
+              (if pipeent
+                (progn
+                  (setq pinfo (get-pipe-info pipeent))
+                  (if pinfo
+                    (progn
+                      (setq cat (cadr pinfo))
+                      (cond
+                        ((vl-string-search "pipe-lateral" cat)
+                         (setq lat-pipes  (cons pinfo lat-pipes)))
+                        ((vl-string-search "pipe-main" cat)
+                         (setq main-pipes (cons pinfo main-pipes)))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+            ;; Only check valves with exactly 1 lateral + 1 main
+            (if (and (= (length lat-pipes) 1) (= (length main-pipes) 1))
+              (progn
+                (setq lat-size  (car (car lat-pipes)))
+                (setq main-size (car (car main-pipes)))
+                ;; Find branch main entity for traversal
+                (setq branch-main-ent nil)
+                (foreach h handles
+                  (if (not branch-main-ent)
+                    (progn
+                      (setq pipeent (handent h))
+                      (if pipeent
+                        (progn
+                          (setq pinfo (get-pipe-info pipeent))
+                          (if (and pinfo (vl-string-search "pipe-main" (cadr pinfo)))
+                            (setq branch-main-ent pipeent)))))))
+                ;; Walk fittings; flag valve if feeder not found
+                (setq feeder-ent (if branch-main-ent (cv-find-feeder-mainline branch-main-ent) nil))
+                (if (null feeder-ent)
+                  (progn
+                    (setq desc
+                      (strcat
+                        (cdr (assoc 5 entdata)) "  |  "
+                        bname "  |  "
+                        "lat:" lat-size "  main:" main-size "  no feeder"
+                      )
+                    )
+                    (setq detail
+                      (strcat
+                        "Layer: " (cdr (assoc 8 entdata))
+                        "  |  Lateral: " lat-size
+                        "  |  Main: " main-size
+                        "  ->  branch main does not connect to a trunk within 3 hops"
+                      )
+                    )
+                    (setq results (append results (list (list (cdr (assoc 5 entdata)) desc ename detail))))
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+  results
+)
+
 ;;; ── Fix Functions ────────────────────────────────────────────────────────────
 
 ;;; Walk: bad pipe -> connected entity -> if fitting follow its handles -> find pipe-main
@@ -899,6 +1067,15 @@
   )
 )
 
+;;; Detail string for feeder problems (valves dialog feeder section).
+;;; Entry structure: (handle list-str ename detail)  -- detail at index 3.
+(defun cv-feeder-detail (idx)
+  (if (and *DLG-FEEDER-PROBS* (>= idx 0) (< idx (length *DLG-FEEDER-PROBS*)))
+    (nth 3 (nth idx *DLG-FEEDER-PROBS*))
+    ""
+  )
+)
+
 ;;; Show the template picker dialog populated with scan-main-types results.
 ;;; context-str is displayed at the top of the dialog to remind the user what
 ;;; they are fixing (pass "" if not applicable).
@@ -1042,8 +1219,8 @@
 ;;; conn-probs / size-probs are separate problem lists.
 ;;; size-scanned: nil = Check Sizes not yet run; T = run (even if empty result).
 
-(defun run-valves-dialog (ss conn-probs size-probs conn-idx size-idx
-                          / dcl-path dcl-id result has-conn has-size)
+(defun run-valves-dialog (ss conn-probs size-probs feeder-probs conn-idx size-idx feeder-idx
+                          / dcl-path dcl-id result has-conn has-size has-feeder)
   (setq dcl-path
     (cond
       ((and *CP-DIR* (findfile (strcat *CP-DIR* "\\" "checkvalves.dcl")))
@@ -1064,8 +1241,9 @@
       (if (not (new_dialog "checkvalves_dialog" dcl-id))
         (progn (unload_dialog dcl-id) (princ "\nError: could not open checkvalves dialog.") 0)
         (progn
-          (setq has-conn (> (length conn-probs) 0))
-          (setq has-size (> (length size-probs) 0))
+          (setq has-conn   (> (length conn-probs)   0))
+          (setq has-size   (> (length size-probs)   0))
+          (setq has-feeder (> (length feeder-probs) 0))
           ;; ── Status row ──────────────────────────────────────────────────────
           (set_tile "sel_count" (if ss (strcat (itoa (sslength ss)) " objects") "--"))
           ;; ── Connection section ───────────────────────────────────────────────
@@ -1120,12 +1298,39 @@
               (setq *DLG-SIZE-IDX* -1)
             )
           )
+          ;; ── Feeder section ───────────────────────────────────────────────────
+          (set_tile "feeder_count"
+            (if ss
+              (strcat "Unpiped: " (itoa (length feeder-probs)))
+              "Unpiped: --"
+            )
+          )
+          (setq *DLG-FEEDER-PROBS* feeder-probs)
+          (start_list "feeder_list")
+          (cond
+            ((null ss)        (add_list "(no selection - click Select Geometry)"))
+            ((not has-feeder) (add_list "(no unpiped valves found)"))
+            (T                (mapcar 'add_list (mapcar 'cadr feeder-probs)))
+          )
+          (end_list)
+          (if (and has-feeder (>= feeder-idx 0) (< feeder-idx (length feeder-probs)))
+            (progn
+              (set_tile "feeder_list"   (itoa feeder-idx))
+              (set_tile "feeder_detail" (cv-feeder-detail feeder-idx))
+              (setq *DLG-FEEDER-IDX* feeder-idx)
+            )
+            (progn
+              (set_tile "feeder_detail" "")
+              (setq *DLG-FEEDER-IDX* -1)
+            )
+          )
           ;; ── Button enable/disable ────────────────────────────────────────────
-          (mode_tile "zoom_btn"      (if has-conn 0 1))
-          (mode_tile "fix_valve_btn" (if has-conn 0 1))
-          (mode_tile "size_zoom_btn" (if has-size 0 1))
-          (mode_tile "fix_main_btn"  (if has-size 0 1))
-          (mode_tile "fix_all_btn"   (if has-size 0 1))
+          (mode_tile "zoom_btn"        (if has-conn   0 1))
+          (mode_tile "fix_valve_btn"  (if has-conn   0 1))
+          (mode_tile "size_zoom_btn"  (if has-size   0 1))
+          (mode_tile "fix_main_btn"   (if has-size   0 1))
+          (mode_tile "fix_all_btn"    (if has-size   0 1))
+          (mode_tile "feeder_zoom_btn" (if has-feeder 0 1))
           ;; ── Action tiles ─────────────────────────────────────────────────────
           (action_tile "conn_list"
             (strcat
@@ -1141,13 +1346,21 @@
               "(if (= $reason 4) (done_dialog 7))"
             )
           )
-          (action_tile "zoom_btn"      "(setq *DLG-CONN-IDX* (atoi (get_tile \"conn_list\"))) (done_dialog 2)")
-          (action_tile "fix_valve_btn" "(setq *DLG-CONN-IDX* (atoi (get_tile \"conn_list\"))) (done_dialog 8)")
-          (action_tile "size_zoom_btn" "(setq *DLG-SIZE-IDX* (atoi (get_tile \"size_list\"))) (done_dialog 7)")
-          (action_tile "fix_main_btn"  "(setq *DLG-SIZE-IDX* (atoi (get_tile \"size_list\"))) (done_dialog 5)")
-          (action_tile "fix_all_btn"   "(setq *DLG-SIZE-IDX* (atoi (get_tile \"size_list\"))) (done_dialog 6)")
-          (action_tile "sel_btn"       "(done_dialog 3)")
-          (action_tile "close_btn"     "(done_dialog 0)")
+          (action_tile "feeder_list"
+            (strcat
+              "(setq *DLG-FEEDER-IDX* (atoi $value))"
+              "(set_tile \"feeder_detail\" (cv-feeder-detail *DLG-FEEDER-IDX*))"
+              "(if (= $reason 4) (done_dialog 4))"
+            )
+          )
+          (action_tile "zoom_btn"       "(setq *DLG-CONN-IDX*   (atoi (get_tile \"conn_list\")))   (done_dialog 2)")
+          (action_tile "fix_valve_btn"  "(setq *DLG-CONN-IDX*   (atoi (get_tile \"conn_list\")))   (done_dialog 8)")
+          (action_tile "size_zoom_btn"  "(setq *DLG-SIZE-IDX*   (atoi (get_tile \"size_list\")))   (done_dialog 7)")
+          (action_tile "fix_main_btn"   "(setq *DLG-SIZE-IDX*   (atoi (get_tile \"size_list\")))   (done_dialog 5)")
+          (action_tile "fix_all_btn"    "(setq *DLG-SIZE-IDX*   (atoi (get_tile \"size_list\")))   (done_dialog 6)")
+          (action_tile "feeder_zoom_btn" "(setq *DLG-FEEDER-IDX* (atoi (get_tile \"feeder_list\"))) (done_dialog 4)")
+          (action_tile "sel_btn"        "(done_dialog 3)")
+          (action_tile "close_btn"      "(done_dialog 0)")
           (setq result (start_dialog))
           (unload_dialog dcl-id)
           result
@@ -1297,31 +1510,34 @@
 ;;;   conn-problems — valve connection check (1 lateral + 1 main)
 ;;;   size-problems — lateral vs. main pipe size mismatch
 
-(defun run-valves-open ( / ss conn-problems size-problems
-                           conn-sel-idx size-sel-idx
+(defun run-valves-open ( / ss conn-problems size-problems feeder-problems
+                           conn-sel-idx size-sel-idx feeder-sel-idx
                            result sel-ent new-ss fixed-count done
                            cv-sizes cv-target-size cv-group
                            cv-tpl cv-tpl-xd cv-tpl-strings cv-tpl-size cv-lat-size
                            cv-all-templates cv-templates cv-tpl-pick cv-ctx)
-  ;; Start with last selection if available; run both scans together
+  ;; Start with last selection if available; run all three scans together
   (setq ss *CV-LAST-SS*)
   (if ss
     (progn
       (princ "\nScanning...")
-      (setq conn-problems (scan-valves ss))
-      (setq size-problems (scan-valve-sizes ss))
+      (setq conn-problems   (scan-valves ss))
+      (setq size-problems   (scan-valve-sizes ss))
+      (setq feeder-problems (scan-valve-feeders ss))
     )
     (progn
-      (setq conn-problems '())
-      (setq size-problems '())
+      (setq conn-problems   '())
+      (setq size-problems   '())
+      (setq feeder-problems '())
     )
   )
-  (setq conn-sel-idx  0)
-  (setq size-sel-idx  0)
-  (setq done          nil)
+  (setq conn-sel-idx   0)
+  (setq size-sel-idx   0)
+  (setq feeder-sel-idx 0)
+  (setq done           nil)
   (while (not done)
-    (setq result (run-valves-dialog ss conn-problems size-problems
-                                    conn-sel-idx size-sel-idx))
+    (setq result (run-valves-dialog ss conn-problems size-problems feeder-problems
+                                    conn-sel-idx size-sel-idx feeder-sel-idx))
     (cond
       ;; ── Close ───────────────────────────────────────────────────────────────
       ((= result 0)
@@ -1338,21 +1554,34 @@
          (princ "\nNo item selected.")
        )
       )
+      ;; ── Find Valve (feeder section) ─────────────────────────────────────────
+      ((= result 4)
+       (if (and (>= *DLG-FEEDER-IDX* 0) (< *DLG-FEEDER-IDX* (length feeder-problems)))
+         (progn
+           (zoom-to-ent (caddr (nth *DLG-FEEDER-IDX* feeder-problems)))
+           (setq feeder-sel-idx *DLG-FEEDER-IDX*)
+         )
+         (princ "\nNo item selected.")
+       )
+      )
       ;; ── Select Geometry ─────────────────────────────────────────────────────
       ((= result 3)
        (princ "\nSelect objects to scan: ")
        (setq new-ss (ssget))
        (if new-ss
          (progn
-           (setq ss            new-ss)
-           (setq *CV-LAST-SS*  ss)
+           (setq ss              new-ss)
+           (setq *CV-LAST-SS*    ss)
            (princ "\nScanning...")
-           (setq conn-problems (scan-valves ss))
-           (setq size-problems (scan-valve-sizes ss))
-           (setq conn-sel-idx  0)
-           (setq size-sel-idx  0)
-           (if (= (length conn-problems) 0) (princ "\nNo connection problems found."))
-           (if (= (length size-problems) 0) (princ "\nNo size mismatches found."))
+           (setq conn-problems   (scan-valves ss))
+           (setq size-problems   (scan-valve-sizes ss))
+           (setq feeder-problems (scan-valve-feeders ss))
+           (setq conn-sel-idx    0)
+           (setq size-sel-idx    0)
+           (setq feeder-sel-idx  0)
+           (if (= (length conn-problems)   0) (princ "\nNo connection problems found."))
+           (if (= (length size-problems)   0) (princ "\nNo size mismatches found."))
+           (if (= (length feeder-problems) 0) (princ "\nNo unpiped valves found."))
          )
          (princ "\nNothing selected.")
        )

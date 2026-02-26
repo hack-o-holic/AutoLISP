@@ -63,9 +63,64 @@ checkvalves_dialog : dialog {
     }
   }
 
+  // ── No Feeder Main check ──────────────────────────────────────────────────
+  : boxed_column {
+    label = "No Feeder Main  (branch main does not connect to trunk -- unpiped valve)";
+    : list_box {
+      key          = "feeder_list";
+      label        = "Unpiped valves  (double-click or Find Valve to navigate):";
+      height       = 5;
+      width        = 70;
+      fixed_width  = true;
+      allow_accept = true;
+    }
+    : text { key = "feeder_detail"; label = " "; width = 70; fixed_width = true; }
+    : row {
+      : text { key = "feeder_count"; label = "Unpiped: --"; width = 22; fixed_width = true; }
+      : button { key = "feeder_zoom_btn"; label = "Find Valve"; width = 12; fixed_width = true; }
+      : spacer {}
+    }
+  }
+
   spacer;
 
   // ── Bottom ────────────────────────────────────────────────────────────
+  : row {
+    : spacer {}
+    : button { key = "close_btn"; label = "Close"; width = 12; fixed_width = true; is_cancel = true; }
+  }
+}
+
+// ── COUNTVALVES results dialog ───────────────────────────────────────────────
+valvetally_dialog : dialog {
+  label = "Valve & Saddle Tally";
+  : text { key = "vt_header"; label = " "; width = 55; fixed_width = true; }
+  : boxed_column {
+    label = "SOV Sizes";
+    : list_box { key = "sov_list"; height = 6; width = 55; fixed_width = true; allow_accept = true; }
+    : row {
+      : spacer {}
+      : button { key = "find_sov_btn"; label = "Find Valves"; width = 14; fixed_width = true; }
+    }
+  }
+  : boxed_column {
+    label = "Saddle Sizes  (feeder main x branch main)";
+    : list_box { key = "saddle_list"; height = 8; width = 55; fixed_width = true; allow_accept = true; }
+    : row {
+      : spacer {}
+      : button { key = "find_saddle_btn"; label = "Find Valves"; width = 14; fixed_width = true; }
+    }
+  }
+  : boxed_column {
+    label = "No Main Pipe  (valve has no main pipe connected)";
+    : list_box { key = "nomn_list"; height = 4; width = 55; fixed_width = true; allow_accept = true; }
+    : row {
+      : text { key = "nomn_count"; label = "Unconnected: --"; width = 22; fixed_width = true; }
+      : spacer {}
+      : button { key = "find_nomn_btn"; label = "Find Valve"; width = 14; fixed_width = true; }
+    }
+  }
+  spacer;
   : row {
     : spacer {}
     : button { key = "close_btn"; label = "Close"; width = 12; fixed_width = true; is_cancel = true; }

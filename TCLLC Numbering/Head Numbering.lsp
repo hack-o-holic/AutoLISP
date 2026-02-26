@@ -18,9 +18,11 @@
 ;;; CONFIGURATION
 ;;; ------------------------------------------------------------------------
 
-(setq *HN-Locations* '("TE" "FW" "FP" "RG" "GR" "GP"))
-(setq *HN-MaxHole*   27)
-(setq *HN-DIR*       (vl-filename-directory (findfile "Head Numbering.lsp")))
+(setq *HN-Locations*     '("TE" "FW" "FP" "RG" "GR" "GP"))
+(setq *HN-MaxHole*       27)
+(setq *HN-DIR*           (vl-filename-directory (findfile "Head Numbering.lsp")))
+(if (not *HN-LastHole*)     (setq *HN-LastHole*     nil))
+(if (not *HN-LastLocation*) (setq *HN-LastLocation* nil))
 
 ;;; ------------------------------------------------------------------------
 ;;; DICTIONARY MANAGEMENT FUNCTIONS
@@ -231,6 +233,26 @@
       T
     )
     nil
+  )
+)
+
+(defun FillGaps (hole location / tags sorted i ent)
+  "Renumber all tags in hole/location sequentially 1,2,3... eliminating all gaps"
+  (setq tags (GetAllHeadTags hole location))
+  (if (not tags)
+    (progn (princ "\nFillGaps: no tags found.") nil)
+    (progn
+      (setq sorted (vl-sort tags '(lambda (a b) (< (cadr a) (cadr b)))))
+      (setq i 1)
+      (foreach tag sorted
+        (setq ent (car tag))
+        (UpdateTagNumber ent hole location i (GetHeadHandleFromTag ent))
+        (setq i (1+ i))
+      )
+      (SetCounter hole location (1- i))
+      (princ (strcat "\nFillGaps: renumbered " (itoa (length sorted)) " tags."))
+      (length sorted)
+    )
   )
 )
 
@@ -670,22 +692,21 @@
   items
 )
 
-(defun HN-CountGaps (hole location / tags nums max-num)
-  "Return the number of gaps in the hole/location sequence."
+(defun HN-RefreshStatus (hole location / tags nums max-num gap-count next-num)
+  "Update gap_label and next_label from actual tags in the drawing (ignores stored counter)."
   (setq tags (GetAllHeadTags hole location))
   (if (null tags)
-    0
     (progn
-      (setq nums (mapcar 'cadr tags))
-      (setq max-num (apply 'max nums))
-      (- max-num (length nums))
+      (setq gap-count 0)
+      (setq next-num  1)
+    )
+    (progn
+      (setq nums     (mapcar 'cadr tags))
+      (setq max-num  (apply 'max nums))
+      (setq gap-count (- max-num (length nums)))
+      (setq next-num  (NextAvailable hole location (1+ max-num)))
     )
   )
-)
-
-(defun HN-RefreshStatus (hole location / gap-count next-num)
-  "Update gap_label and next_label tiles for the given hole/location."
-  (setq gap-count (HN-CountGaps hole location))
   (set_tile "gap_label"
     (cond
       ((= gap-count 0) "")
@@ -693,9 +714,9 @@
       (T               "** Gaps Exist **")
     )
   )
-  (setq next-num (NextAvailable hole location (1+ (GetCounter hole location))))
   (set_tile "next_label"
     (strcat "Auto next: " (FormatHoleNumber hole) location (FormatNumber next-num)))
+  (mode_tile "fill_gaps_btn" (if (> gap-count 0) 0 1))
 )
 
 (defun HN-ToggleSprayers (/ layers doc layer-obj first-obj turn-on)
@@ -721,6 +742,542 @@
         )
       )
       (princ (strcat "\nSprayer layers " (if turn-on "ON" "OFF")))
+    )
+  )
+)
+
+;;; ------------------------------------------------------------------------
+;;; EXPORT DIALOG HELPERS
+;;; ------------------------------------------------------------------------
+
+(defun MakeSelectAllStr (n / i str)
+  "Build '0 1 2 ... n-1' selection string for DCL multi-select list_box"
+  (setq str "" i 0)
+  (repeat n
+    (setq str (strcat str (if (= i 0) "" " ") (itoa i)))
+    (setq i (1+ i))
+  )
+  str
+)
+
+(defun ScanDrawingCombos (/ ss i ent xdata xd-inner hole-str loc-str num-str num-int key
+                             combos-alist existing combo-list spc hole-part loc-part gap-count
+                             tagged-handles head-handle-val
+                             ss2 j ent2 ent-data2 lfx-entry2 lfx-vals2
+                             first-1000 ent-handle unnumbered-count)
+  "Scan tags for hole/loc combos, count gaps, and count unnumbered LandFX heads.
+   Returns list of (hole-int loc-str count gap-count) sorted by hole/loc, with
+   (0 \"UNNUMBERED\" count 0) appended at end if unnumbered heads exist."
+  (setq combos-alist  '()   ; each entry: (key count max-num)
+        tagged-handles '())
+
+  ; Pass 1: scan tags — build combo counts/max-nums AND collect linked head handles
+  (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999"))))
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq ent (ssname ss i))
+        (if (setq xdata (assoc -3 (entget ent '("HEADNUM"))))
+          (progn
+            (setq xd-inner        (cdr (assoc "HEADNUM" (cdr xdata))))
+            (setq hole-str        (cdr (nth 0 xd-inner)))
+            (setq loc-str         (cdr (nth 1 xd-inner)))
+            (setq num-str         (cdr (nth 2 xd-inner)))
+            (setq num-int         (if num-str (atoi num-str) 0))
+            (setq head-handle-val (cdr (nth 3 xd-inner)))  ; 1005 = head handle
+            (if head-handle-val
+              (setq tagged-handles (cons head-handle-val tagged-handles))
+            )
+            (if (and hole-str loc-str)
+              (progn
+                (setq key (strcat hole-str "|" loc-str))
+                (if (setq existing (assoc key combos-alist))
+                  (setq combos-alist
+                    (subst (list key (1+ (cadr existing)) (max (caddr existing) num-int))
+                           existing
+                           combos-alist))
+                  (setq combos-alist (append combos-alist (list (list key 1 num-int))))
+                )
+              )
+            )
+          )
+        )
+        (setq i (1+ i))
+      )
+    )
+  )
+
+  ; Convert to (hole-int loc-str count gap-count) and sort
+  ; gap-count = max-num - count  (numbers missing from 1..max)
+  (setq combo-list '())
+  (foreach pair combos-alist
+    (setq key       (car  pair))
+    (setq gap-count (- (caddr pair) (cadr pair)))  ; max-num - count
+    (setq spc       (vl-string-search "|" key))
+    (setq hole-part (substr key 1 spc))
+    (setq loc-part  (substr key (+ 2 spc)))
+    (setq combo-list (append combo-list
+      (list (list (atoi hole-part) loc-part (cadr pair) gap-count))))
+  )
+  (setq combo-list
+    (vl-sort combo-list
+      '(lambda (a b)
+         (cond
+           ((< (car a) (car b)) T)
+           ((= (car a) (car b)) (< (cadr a) (cadr b)))
+           (T nil)
+         )
+       )
+    )
+  )
+
+  ; Pass 2: count LandFX head blocks not linked to any tag
+  (setq unnumbered-count 0)
+  (if (setq ss2 (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+    (progn
+      (setq j 0)
+      (repeat (sslength ss2)
+        (setq ent2      (ssname ss2 j))
+        (setq ent-data2 (entget ent2 '("LandFX")))
+        (if (setq lfx-entry2 (assoc "LandFX" (cdr (assoc -3 ent-data2))))
+          (progn
+            (setq lfx-vals2  (cdr lfx-entry2))
+            (setq first-1000 (cdr (assoc 1000 lfx-vals2)))
+            (if (= first-1000 "Head")
+              (progn
+                (setq ent-handle (cdr (assoc 5 ent-data2)))
+                (if (not (member ent-handle tagged-handles))
+                  (setq unnumbered-count (1+ unnumbered-count))
+                )
+              )
+            )
+          )
+        )
+        (setq j (1+ j))
+      )
+    )
+  )
+  (if (> unnumbered-count 0)
+    (setq combo-list (append combo-list (list (list 0 "UNNUMBERED" unnumbered-count 0))))
+  )
+
+  combo-list
+)
+
+(defun GetHeadDescStr (head-ent / lfx-data lfx-vals v2 v3)
+  "Return 'Model-Nozzle' desc string from a head block's LandFX XDATA"
+  (if (and head-ent
+           (setq lfx-data (assoc "LandFX" (cdr (assoc -3 (entget head-ent '("LandFX")))))))
+    (progn
+      (setq lfx-vals (cdr lfx-data))
+      (setq v3 (nth 3 lfx-vals))   ; model short key  e.g. "RAIN-752"
+      (setq v2 (nth 2 lfx-vals))   ; nozzle number    e.g. "20"
+      (if (and v3 v2 (= (car v3) 1000) (= (car v2) 1000))
+        (strcat (cdr v3) "-" (cdr v2))
+        "HEAD"
+      )
+    )
+    "HEAD"
+  )
+)
+
+(defun HN-ExportSelected (combo-list include-valves output-folder /
+                           dwg-folder dwg-name written-count
+                           hole loc tags sorted-tags
+                           tag-pair tag-ent-name num head-handle head-ent head-pos
+                           E-str N-str desc-str row rows csv-path fh
+                           ss i ent ent-data lfx-entry lfx-vals
+                           first-1000 pos v12 valve-rows valve-count
+                           u-tagged-h u-ss u-i u-ent u-data u-lfx u-vals
+                           u-h0 u-handle u-tag-ss u-j u-tag-ent u-hh)
+  "Export PNEZD CSVs for selected hole/location combos; include-valves=T also writes VALVES.csv"
+  (setq dwg-folder    output-folder)
+  (setq dwg-name      (vl-filename-base (getvar "DWGNAME")))
+  (setq written-count 0)
+
+  ; Validate output folder exists before writing anything
+  (if (not (vl-file-directory-p (vl-string-right-trim "\\" dwg-folder)))
+    (progn
+      (alert (strcat "Output folder does not exist or is not accessible:\n"
+                     dwg-folder
+                     "\n\nIf you created a new folder in the browser, press Enter\n"
+                     "to confirm its name before clicking OK."))
+      (exit)
+    )
+  )
+  (princ (strcat "\nExporting to: " dwg-folder))
+
+  ; --- Head CSVs (numbered and unnumbered) ---
+  (foreach combo combo-list
+    (setq hole (car   combo))
+    (setq loc  (cadr  combo))
+
+    (if (= loc "UNNUMBERED")
+
+      ; --- Unnumbered branch: heads with no tag ---
+      (progn
+        ; Build set of all tagged head handles
+        (setq u-tagged-h '())
+        (if (setq u-tag-ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999"))))
+          (progn
+            (setq u-j 0)
+            (repeat (sslength u-tag-ss)
+              (setq u-tag-ent (ssname u-tag-ss u-j))
+              (setq u-hh (GetHeadHandleFromTag u-tag-ent))
+              (if u-hh (setq u-tagged-h (cons u-hh u-tagged-h)))
+              (setq u-j (1+ u-j))
+            )
+          )
+        )
+        ; Scan all LandFX heads; export those not in tagged set
+        (setq rows '())
+        (if (setq u-ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+          (progn
+            (setq u-i 0)
+            (repeat (sslength u-ss)
+              (setq u-ent  (ssname u-ss u-i))
+              (setq u-data (entget u-ent '("LandFX")))
+              (if (setq u-lfx (assoc "LandFX" (cdr (assoc -3 u-data))))
+                (progn
+                  (setq u-vals (cdr u-lfx))
+                  (setq u-h0   (cdr (assoc 1000 u-vals)))
+                  (if (= u-h0 "Head")
+                    (progn
+                      (setq u-handle (cdr (assoc 5 u-data)))
+                      (if (not (member u-handle u-tagged-h))
+                        (progn
+                          (setq head-pos (cdr (assoc 10 u-data)))
+                          (setq E-str    (rtos (car  head-pos) 2 4))
+                          (setq N-str    (rtos (cadr head-pos) 2 4))
+                          (setq desc-str (GetHeadDescStr u-ent))
+                          (setq rows (append rows
+                            (list (list "" N-str E-str "0" desc-str))
+                          ))
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+              (setq u-i (1+ u-i))
+            )
+          )
+        )
+        (if rows
+          (progn
+            (setq csv-path (strcat dwg-folder dwg-name "_UNNUMBERED.csv"))
+            (setq fh (open csv-path "w"))
+            (if fh
+              (progn
+                (write-line "Point,Northing,Easting,Elevation,Description" fh)
+                (foreach row rows
+                  (write-line
+                    (strcat (car row) "," (cadr row) "," (caddr row) ","
+                            (nth 3 row) "," (nth 4 row))
+                    fh))
+                (close fh)
+                (princ (strcat "\nWrote: " csv-path " (" (itoa (length rows)) " unnumbered heads)"))
+                (setq written-count (1+ written-count))
+              )
+              (princ (strcat "\nERROR: Cannot open " csv-path " for writing."))
+            )
+          )
+        )
+      )
+
+      ; --- Numbered branch ---
+      (progn
+        (setq tags (GetAllHeadTags hole loc))
+        (if (not tags)
+          (princ (strcat "\nSkipping " (FormatHoleNumber hole) loc ": no tags found."))
+          (progn
+            (setq sorted-tags (vl-sort tags '(lambda (a b) (< (cadr a) (cadr b)))))
+            (setq rows '())
+            (foreach tag-pair sorted-tags
+              (setq tag-ent-name (car  tag-pair))
+              (setq num          (cadr tag-pair))
+              (setq head-handle  (GetHeadHandleFromTag tag-ent-name))
+              (if (and head-handle (setq head-ent (handent head-handle)))
+                (progn
+                  (setq head-pos (cdr (assoc 10 (entget head-ent))))
+                  (setq E-str    (rtos (car  head-pos) 2 4))
+                  (setq N-str    (rtos (cadr head-pos) 2 4))
+                  (setq desc-str (GetHeadDescStr head-ent))
+                  (setq rows (append rows
+                    (list (list (FormatNumber num) N-str E-str "0" desc-str))
+                  ))
+                )
+              )
+            )
+            (if rows
+              (progn
+                (setq csv-path (strcat dwg-folder dwg-name "_"
+                                       (FormatHoleNumber hole) loc ".csv"))
+                (setq fh (open csv-path "w"))
+                (if fh
+                  (progn
+                    (write-line "Point,Northing,Easting,Elevation,Description" fh)
+                    (foreach row rows
+                      (write-line
+                        (strcat (car row) "," (cadr row) "," (caddr row) ","
+                                (nth 3 row) "," (nth 4 row))
+                        fh))
+                    (close fh)
+                    (princ (strcat "\nWrote: " csv-path " (" (itoa (length rows)) " heads)"))
+                    (setq written-count (1+ written-count))
+                  )
+                  (princ (strcat "\nERROR: Cannot open " csv-path " for writing."))
+                )
+              )
+            )
+          )
+        )
+      )
+
+    ) ; end if UNNUMBERED
+  ) ; end foreach
+
+  ; --- Valve CSV (optional) ---
+  (if include-valves
+    (progn
+      (setq valve-rows '() valve-count 0)
+      (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+        (progn
+          (setq i 0)
+          (repeat (sslength ss)
+            (setq ent      (ssname ss i))
+            (setq ent-data (entget ent '("LandFX")))
+            (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
+              (progn
+                (setq lfx-vals   (cdr lfx-entry))
+                (setq first-1000 (cdr (assoc 1000 lfx-vals)))
+                (if (= first-1000 "Valve")
+                  (progn
+                    (setq valve-count (1+ valve-count))
+                    (setq pos   (cdr (assoc 10 ent-data)))
+                    (setq E-str (rtos (car  pos) 2 4))
+                    (setq N-str (rtos (cadr pos) 2 4))
+                    (setq v12   (nth 12 lfx-vals))
+                    (setq desc-str
+                      (if (and v12 (= (car v12) 1000) (> (strlen (cdr v12)) 0))
+                        (cdr v12) "VALVE"))
+                    (setq valve-rows
+                      (append valve-rows (list (list "" N-str E-str "0" desc-str))))
+                  )
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+        )
+      )
+      (if (> valve-count 0)
+        (progn
+          (setq valve-rows
+            (vl-sort valve-rows
+              '(lambda (a b)
+                 (cond
+                   ((< (nth 4 a) (nth 4 b)) T)
+                   ((= (nth 4 a) (nth 4 b)) (< (atof (caddr a)) (atof (caddr b))))
+                   (T nil)
+                 )
+               )
+            )
+          )
+          (setq csv-path (strcat dwg-folder dwg-name "_VALVES.csv"))
+          (setq fh (open csv-path "w"))
+          (if fh
+            (progn
+              (write-line "Point,Northing,Easting,Elevation,Description" fh)
+              (foreach row valve-rows
+                (write-line
+                  (strcat (car row) "," (cadr row) "," (caddr row) ","
+                          (nth 3 row) "," (nth 4 row))
+                  fh))
+              (close fh)
+              (princ (strcat "\nWrote: " csv-path " (" (itoa valve-count) " valves)"))
+              (setq written-count (1+ written-count))
+            )
+            (princ (strcat "\nERROR: Cannot open " csv-path " for writing."))
+          )
+        )
+        (princ "\nNo valves found.")
+      )
+    )
+  )
+
+  (princ (strcat "\nExport complete: " (itoa written-count) " file(s) written."))
+  written-count
+)
+
+(defun HN-BuildComboItems (combos)
+  "Build display strings for HeadExportDialog list_box from (hole loc count gap-count) list"
+  (mapcar
+    '(lambda (c)
+       (cond
+         ((= (cadr c) "UNNUMBERED")
+           (strcat "Unnumbered  (" (itoa (caddr c)) " heads)"))
+         ((> (cadddr c) 0)
+           (strcat (FormatHoleNumber (car c)) " " (cadr c)
+                   "  (" (itoa (caddr c)) " heads, "
+                   (itoa (cadddr c)) " gap" (if (= (cadddr c) 1) "" "s") ")"))
+         (T
+           (strcat (FormatHoleNumber (car c)) " " (cadr c)
+                   "  (" (itoa (caddr c)) " heads)"))
+       )
+     )
+    combos
+  )
+)
+
+(defun HN-BrowseForFolder (prompt default-path / shell folder self-obj path)
+  "Show Windows Shell folder browser dialog. Returns selected path with trailing \\ or nil."
+  (vl-load-com)
+  (setq shell (vlax-create-object "Shell.Application"))
+  (if (not shell)
+    nil
+    (progn
+      (setq folder
+        (vl-catch-all-apply
+          'vlax-invoke-method
+          (list shell 'BrowseForFolder 0 prompt 64 0)  ; 64=BIF_NEWDIALOGSTYLE, 0=Desktop root (unrestricted)
+        )
+      )
+      (vlax-release-object shell)
+      (if (or (null folder) (vl-catch-all-error-p folder))
+        nil
+        (progn
+          (setq self-obj (vlax-get-property folder 'Self))
+          (setq path     (vlax-get-property self-obj 'Path))
+          (vlax-release-object self-obj)
+          (vlax-release-object folder)
+          ; Ensure trailing backslash
+          (if (/= (substr path (strlen path)) "\\")
+            (setq path (strcat path "\\"))
+          )
+          path
+        )
+      )
+    )
+  )
+)
+
+(defun HN-RunExportDialog (/ dcl-path dcl_id export-combos combo-count combo-items
+                              sel-str sel-list selected-combos include-valves result
+                              output-folder browse-result fix-c)
+  "Scan drawing for numbered areas, show export selection dialog, run export or fix gaps"
+  (princ "\nScanning drawing for numbered heads...")
+  (setq export-combos (ScanDrawingCombos))
+  (if (not export-combos)
+    (progn (alert "No numbered heads found in drawing.") (exit))
+  )
+  (setq combo-count (length export-combos))
+  (setq combo-items (HN-BuildComboItems export-combos))
+
+  ; Load and show sub-dialog
+  (setq dcl-path (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))
+  (setq dcl_id (load_dialog dcl-path))
+  (if (not (new_dialog "HeadExportDialog" dcl_id))
+    (progn
+      (unload_dialog dcl_id)
+      (alert "ERROR: Could not load export dialog!")
+      (exit)
+    )
+  )
+
+  ; Default output folder = drawing's folder
+  (setq output-folder (getvar "DWGPREFIX"))
+
+  ; Populate list; default to all selected
+  (start_list "export_list")
+  (mapcar 'add_list combo-items)
+  (end_list)
+  (set_tile "export_list" (MakeSelectAllStr combo-count))
+  (set_tile "include_valves" "1")
+  (set_tile "output_folder" output-folder)
+  ; Enable Fix Gaps button only when at least one combo has gaps
+  (mode_tile "fix_gaps_btn"
+    (if (vl-some '(lambda (c) (> (cadddr c) 0)) export-combos) 0 1))
+
+  (action_tile "select_all_btn"
+    "(set_tile \"export_list\" (MakeSelectAllStr combo-count))"
+  )
+  (action_tile "clear_all_btn"
+    "(set_tile \"export_list\" \"\")"
+  )
+  ; Fix Gaps — operates on selection (or all if nothing selected), then refreshes list
+  (action_tile "fix_gaps_btn"
+    "(progn
+       (setq sel-str (get_tile \"export_list\"))
+       (setq sel-list
+         (if (and sel-str (/= sel-str \"\"))
+           (read (strcat \"(\" sel-str \")\"))
+           (MakeRange 0 (1- combo-count))
+         )
+       )
+       (foreach idx sel-list
+         (setq fix-c (nth idx export-combos))
+         (if (and fix-c
+                  (> (cadddr fix-c) 0)
+                  (/= (cadr fix-c) \"UNNUMBERED\"))
+           (FillGaps (car fix-c) (cadr fix-c))
+         )
+       )
+       (setq export-combos (ScanDrawingCombos))
+       (setq combo-count   (length export-combos))
+       (setq combo-items   (HN-BuildComboItems export-combos))
+       (start_list \"export_list\")
+       (mapcar 'add_list combo-items)
+       (end_list)
+       (mode_tile \"fix_gaps_btn\"
+         (if (vl-some '(lambda (c) (> (cadddr c) 0)) export-combos) 0 1))
+     )"
+  )
+  (action_tile "browse_btn"
+    "(progn
+       (setq browse-result
+         (HN-BrowseForFolder \"Select output folder\" output-folder))
+       (if browse-result
+         (progn
+           (setq output-folder browse-result)
+           (set_tile \"output_folder\" output-folder)
+         )
+       )
+     )"
+  )
+  (action_tile "accept"
+    "(setq sel-str        (get_tile \"export_list\"))
+     (setq include-valves (get_tile \"include_valves\"))
+     (setq output-folder  (get_tile \"output_folder\"))
+     (if (and output-folder
+              (/= output-folder \"\")
+              (/= (substr output-folder (strlen output-folder)) \"\\\\\"))
+       (setq output-folder (strcat output-folder \"\\\\\"))
+     )
+     (done_dialog 1)"
+  )
+  (action_tile "cancel" "(done_dialog 0)")
+
+  (setq result (start_dialog))
+  (unload_dialog dcl_id)
+
+  (if (= result 1)
+    (progn
+      (setq sel-list
+        (if (and sel-str (/= sel-str ""))
+          (read (strcat "(" sel-str ")"))
+          '()
+        )
+      )
+      (if (not sel-list)
+        (princ "\nNo areas selected — nothing exported.")
+        (progn
+          (setq selected-combos
+            (mapcar '(lambda (idx) (nth idx export-combos)) sel-list)
+          )
+          (HN-ExportSelected selected-combos (= include-valves "1") output-folder)
+        )
+      )
     )
   )
 )
@@ -829,6 +1386,28 @@
      )"
   )
   
+  ; Fill Gaps button
+  (action_tile "fill_gaps_btn"
+    "(progn
+       (FillGaps
+         (1+ (atoi (get_tile \"hole_list\")))
+         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
+       )
+       (setq override-number nil)
+       (setq list-items (RefreshTagList
+         (1+ (atoi (get_tile \"hole_list\")))
+         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
+       ))
+       (HN-RefreshStatus
+         (1+ (atoi (get_tile \"hole_list\")))
+         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
+       )
+     )"
+  )
+
+  ; Export button — opens sub-dialog to select areas and run export
+  (action_tile "export_btn" "(HN-RunExportDialog)")
+
   ; OK button
   (action_tile "accept"
     "(setq hole-choice (get_tile \"hole_list\"))
@@ -861,16 +1440,18 @@
   
   (princ "\n=== HEAD NUMBERING ROUTINE ===")
   
-  ; Show settings dialog
-  (if (not (setq settings (ShowSettingsDialog nil nil)))
+  ; Show settings dialog - pre-populate with last used hole/location if available
+  (if (not (setq settings (ShowSettingsDialog *HN-LastHole* *HN-LastLocation*)))
     (progn
       (princ "\nCancelled.")
       (exit)
     )
   )
-  
-  (setq current-hole (car settings))
+
+  (setq current-hole     (car settings))
   (setq current-location (cadr settings))
+  (setq *HN-LastHole*     current-hole)
+  (setq *HN-LastLocation* current-location)
   
   ; Check if any tags exist for this hole/location
   (setq existing-tags (GetAllHeadTags current-hole current-location))
@@ -951,8 +1532,10 @@
         (princ "\nChanging settings...")
         (if (setq settings (ShowSettingsDialog current-hole current-location))
           (progn
-            (setq current-hole (car settings))
+            (setq current-hole     (car settings))
             (setq current-location (cadr settings))
+            (setq *HN-LastHole*     current-hole)
+            (setq *HN-LastLocation* current-location)
             (if (caddr settings)
               (setq current-number (caddr settings))
               (setq current-number (NextAvailable current-hole current-location (1+ (GetCounter current-hole current-location))))
@@ -1067,6 +1650,8 @@
 (princ "\n  REPAIRHEADTAGS     - Backfill XDATA on old tags missing it")
 (princ "\n  REPAIRATTRIBUTES   - Fix blank attribute values using XDATA")
 (princ "\n  STRIPLFXDATA       - Remove LandFX XDATA so LFX stops resetting attributes")
+(princ "\n  EXPORTHEADS        - Export head locations to PNEZD CSV per location")
+(princ "\n  DUMPHEADXDATA      - Dump all XDATA from a head block (diagnostic)")
 (princ "\nBlock required: LAFX-TAG-SQUARE-999 (with XX attribute)")
 (princ "\n==========================================\n")
 (princ)
@@ -1596,6 +2181,397 @@
       )
     )
     (princ "\nNo selection.")
+  )
+  (princ)
+)
+
+;;; ------------------------------------------------------------------------
+;;; EXPORTHEADS — Export VIH head locations to PNEZD CSV files (one per location)
+;;;
+;;; LandFX XDATA field map (confirmed from DUMPHEADXDATA on RAIN-752 VIH):
+;;;   [0] "Head"                    - type identifier
+;;;   [1] "Valve-in-Head Rotor"     - category
+;;;   [2] nozzle number ("20")
+;;;   [3] model key ("RAIN-752")
+;;;   [5] display name ("Rain Bird 752-IC")
+;;;
+;;; Output: [DwgName]_[Location].csv  and  [DwgName]_UNNUMBERED.csv
+;;; Format: Point,Northing,Easting,Elevation,Description
+;;;   Point       = head number (e.g. 01FW007) or "" for unnumbered
+;;;   Northing    = Y (state plane)
+;;;   Easting     = X (state plane)
+;;;   Elevation   = 0
+;;;   Description = Model-Nozzle (e.g. RAIN-752-20)
+;;; ------------------------------------------------------------------------
+
+(defun c:EXPORTHEADS (/ tag-ss tag-ent tag-xd tag-vals t-h1005 tag-map j
+                        ss i ent ent-data pos E-str N-str
+                        lfx-entry lfx-vals first-1000 model-str nozzle-str desc-str
+                        head-handle tag-info pt-num bucket-key row
+                        buckets loc-key rows sorted-rows
+                        dwg-folder dwg-name csv-path fh
+                        head-count unnumbered-count written-files
+                        v2 v3 v12
+                        valve-rows valve-count)
+  "Export all LandFX head blocks to PNEZD CSV files, one file per location code."
+
+  (princ "\n=== EXPORT HEADS TO CSV (PNEZD) ===")
+
+  ; -------------------------------------------------------
+  ; Step 1: Build tag lookup map: head-handle -> (handle hole-str loc-str num-str)
+  ; Much faster than calling HeadHasTag for every head (O(n) vs O(n^2))
+  ; -------------------------------------------------------
+  (setq tag-map '())
+  (if (setq tag-ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999"))))
+    (progn
+      (setq j 0)
+      (repeat (sslength tag-ss)
+        (setq tag-ent (ssname tag-ss j))
+        (if (setq tag-xd (assoc -3 (entget tag-ent '("HEADNUM"))))
+          (progn
+            (setq tag-vals (cdr (assoc "HEADNUM" (cdr tag-xd))))
+            ; Need at least 4 items: hole, loc, num, 1005 handle
+            (if (and tag-vals (>= (length tag-vals) 4))
+              (progn
+                (setq t-h1005 (assoc 1005 tag-vals))
+                (if t-h1005
+                  (setq tag-map
+                    (cons
+                      (list (cdr t-h1005)           ; [0] head handle (key for assoc)
+                            (cdr (nth 0 tag-vals))  ; [1] hole as string e.g. "1"
+                            (cdr (nth 1 tag-vals))  ; [2] location e.g. "FW"
+                            (cdr (nth 2 tag-vals))) ; [3] number e.g. "007"
+                      tag-map
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+        (setq j (1+ j))
+      )
+    )
+  )
+  (princ (strcat "\nBuilt tag map: " (itoa (length tag-map)) " numbered heads."))
+
+  ; -------------------------------------------------------
+  ; Step 2: Scan all INSERT entities with LandFX XDATA, filter for [0]="Head"
+  ; -------------------------------------------------------
+  (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+  (if (null ss)
+    (progn (princ "\nNo LandFX entities found in drawing.") (exit))
+  )
+
+  (setq head-count      0)
+  (setq unnumbered-count 0)
+  (setq buckets         '())
+
+  (setq i 0)
+  (repeat (sslength ss)
+    (setq ent      (ssname ss i))
+    (setq ent-data (entget ent '("LandFX")))
+
+    ; Get LandFX entry and vals list
+    (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
+      (progn
+        (setq lfx-vals   (cdr lfx-entry))
+        (setq first-1000 (cdr (assoc 1000 lfx-vals)))
+
+        (if (= first-1000 "Head")
+          (progn
+            (setq head-count (1+ head-count))
+
+            ; Insertion point → E (X) and N (Y)
+            (setq pos   (cdr (assoc 10 ent-data)))
+            (setq E-str (rtos (car  pos) 2 4))
+            (setq N-str (rtos (cadr pos) 2 4))
+
+            ; Model [3] and Nozzle [2] from LandFX XDATA
+            (setq v2 (nth 2 lfx-vals))
+            (setq v3 (nth 3 lfx-vals))
+            (setq nozzle-str (if (and v2 (= (car v2) 1000)) (cdr v2) ""))
+            (setq model-str  (if (and v3 (= (car v3) 1000)) (cdr v3) ""))
+            (if (and (> (strlen model-str) 0) (> (strlen nozzle-str) 0))
+              (setq desc-str (strcat model-str "-" nozzle-str))
+              (setq desc-str (cdr (assoc 2 ent-data)))  ; fallback: block name
+            )
+
+            ; Look up this head's handle in the tag map
+            (setq head-handle (cdr (assoc 5 ent-data)))
+            (setq tag-info    (assoc head-handle tag-map))
+
+            (if tag-info
+              (progn
+                ; Numbered: build formatted point string and bucket by location
+                (setq pt-num     (strcat (FormatHoleNumber (atoi (cadr tag-info)))
+                                         (caddr tag-info)
+                                         (cadddr tag-info)))
+                (setq bucket-key (caddr tag-info))  ; location code e.g. "FW"
+              )
+              (progn
+                ; Unnumbered
+                (setq pt-num      "")
+                (setq bucket-key  "UNNUMBERED")
+                (setq unnumbered-count (1+ unnumbered-count))
+              )
+            )
+
+            ; Build row (Point N E Z Desc) and add to location bucket
+            (setq row (list pt-num N-str E-str "0" desc-str))
+            (if (assoc bucket-key buckets)
+              (setq buckets
+                (subst
+                  (cons bucket-key (append (cdr (assoc bucket-key buckets)) (list row)))
+                  (assoc bucket-key buckets)
+                  buckets
+                )
+              )
+              (setq buckets (append buckets (list (cons bucket-key (list row)))))
+            )
+          )
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+
+  (if (= head-count 0)
+    (progn (princ "\nNo head blocks found in drawing.") (exit))
+  )
+  (princ (strcat "\nTotal heads: "    (itoa head-count)))
+  (princ (strcat "   Numbered: "      (itoa (- head-count unnumbered-count))))
+  (princ (strcat "   Unnumbered: "    (itoa unnumbered-count)))
+
+  ; -------------------------------------------------------
+  ; Step 3: Write one CSV file per bucket (location or UNNUMBERED)
+  ; -------------------------------------------------------
+  (setq dwg-folder (getvar "DWGPREFIX"))
+  (setq dwg-name   (vl-filename-base (getvar "DWGNAME")))
+  (setq written-files 0)
+
+  (foreach bucket buckets
+    (setq loc-key (car bucket))
+    (setq rows    (cdr bucket))
+
+    ; Sort: numbered rows alphabetically first, then unnumbered
+    (setq sorted-rows
+      (vl-sort rows
+        '(lambda (a b)
+           (cond
+             ((and (> (strlen (car a)) 0) (> (strlen (car b)) 0))
+              (< (car a) (car b)))       ; both numbered: alpha (= numeric for zero-padded)
+             ((> (strlen (car a)) 0) T)  ; a numbered, b not: a first
+             ((> (strlen (car b)) 0) nil); b numbered, a not: b first
+             (T nil)                      ; both unnumbered: stable
+           )
+        )
+      )
+    )
+
+    (setq csv-path (strcat dwg-folder dwg-name "_" loc-key ".csv"))
+    (setq fh (open csv-path "w"))
+
+    (if fh
+      (progn
+        (write-line "Point,Northing,Easting,Elevation,Description" fh)
+        (foreach row sorted-rows
+          (write-line
+            (strcat (car   row) ","
+                    (cadr  row) ","
+                    (caddr row) ","
+                    (nth 3 row) ","
+                    (nth 4 row))
+            fh
+          )
+        )
+        (close fh)
+        (princ (strcat "\nWrote: " csv-path " (" (itoa (length sorted-rows)) " rows)"))
+        (setq written-files (1+ written-files))
+      )
+      (princ (strcat "\nERROR: Cannot write to " csv-path))
+    )
+  )
+
+  ; -------------------------------------------------------
+  ; Step 4: Scan valve blocks — write [DWG]_VALVES.csv
+  ; -------------------------------------------------------
+  (setq valve-rows  '())
+  (setq valve-count 0)
+
+  (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq ent      (ssname ss i))
+        (setq ent-data (entget ent '("LandFX")))
+        (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
+          (progn
+            (setq lfx-vals   (cdr lfx-entry))
+            (setq first-1000 (cdr (assoc 1000 lfx-vals)))
+            ; DEBUG: uncomment next line to see every LandFX type encountered
+            ;(princ (strcat "\n  [VALVE-SCAN] block=" (cdr (assoc 2 ent-data)) "  type=" (if first-1000 first-1000 "NIL")))
+            (if (= first-1000 "Valve")
+              (progn
+                (setq valve-count (1+ valve-count))
+                (setq pos   (cdr (assoc 10 ent-data)))
+                (setq E-str (rtos (car  pos) 2 4))
+                (setq N-str (rtos (cadr pos) 2 4))
+                ; Type code is at index [12] (e.g. "SOV-001", "SOV-005", "RCV-002")
+                (setq v12 (nth 12 lfx-vals))
+                (setq desc-str
+                  (if (and v12 (= (car v12) 1000) (> (strlen (cdr v12)) 0))
+                    (cdr v12)
+                    "VALVE"
+                  )
+                )
+                (setq valve-rows
+                  (append valve-rows (list (list "" N-str E-str "0" desc-str)))
+                )
+              )
+            )
+          )
+        )
+        (setq i (1+ i))
+      )
+      (princ (strcat "\nValve scan: checked " (itoa (sslength ss))
+                     " LandFX entities, found " (itoa valve-count) " valves."))
+    )
+    (princ "\nValve scan: no LandFX entities found in drawing at all.")
+  )
+
+  (if (> valve-count 0)
+    (progn
+      ; Sort by type code (desc), then by Easting within each type
+      (setq valve-rows
+        (vl-sort valve-rows
+          '(lambda (a b)
+             (cond
+               ((< (nth 4 a) (nth 4 b)) T)
+               ((= (nth 4 a) (nth 4 b)) (< (atof (caddr a)) (atof (caddr b))))
+               (T nil)
+             )
+          )
+        )
+      )
+      (setq csv-path (strcat dwg-folder dwg-name "_VALVES.csv"))
+      (setq fh (open csv-path "w"))
+      (if fh
+        (progn
+          (write-line "Point,Northing,Easting,Elevation,Description" fh)
+          (foreach row valve-rows
+            (write-line
+              (strcat (car   row) ","
+                      (cadr  row) ","
+                      (caddr row) ","
+                      (nth 3 row) ","
+                      (nth 4 row))
+              fh
+            )
+          )
+          (close fh)
+          (princ (strcat "\nWrote: " csv-path " (" (itoa valve-count) " valves)"))
+          (setq written-files (1+ written-files))
+        )
+        (princ (strcat "\nERROR: Cannot write to " csv-path))
+      )
+    )
+    (princ "\nNo valve blocks found.")
+  )
+
+  (if (> written-files 0)
+    (progn
+      (princ (strcat "\n\n=== EXPORT COMPLETE: " (itoa written-files) " file(s) written ==="))
+      (princ (strcat "\nFolder: " dwg-folder))
+    )
+    (princ "\n\nNo files written.")
+  )
+  (princ)
+)
+
+;;; ------------------------------------------------------------------------
+;;; DUMPHEADXDATA — Diagnostic: dump all XDATA from a selected head block
+;;; Use this to map field indices for Model / Nozzle before writing EXPORTHEADS
+;;; ------------------------------------------------------------------------
+
+(defun c:DUMPHEADXDATA (/ sel ent ename blkname pos xdata xd-section app-entry app-name pairs idx pair gcode gval att-ent att-data)
+  "Click a head block (VIH rotor or any LAFX head) to dump all XDATA fields to the command line."
+
+  (setq sel (entsel "\nSelect a head block: "))
+
+  (if (null sel)
+    (princ "\nNo selection.")
+    (progn
+      (setq ent     (car sel))
+      (setq ename   (entget ent))
+      (setq blkname (cdr (assoc 2 ename)))
+      (setq pos     (cdr (assoc 10 ename)))
+
+      (princ "\n\n=== DUMPHEADXDATA ===")
+      (princ (strcat "\nBlock name : " blkname))
+      (if pos
+        (princ (strcat "\nInsertion  : " (rtos (car pos) 2 6) " , " (rtos (cadr pos) 2 6)))
+      )
+
+      ;; Grab XDATA from ALL registered apps
+      (setq xdata      (entget ent '("*")))
+      (setq xd-section (assoc -3 xdata))
+
+      (if (null xd-section)
+        (princ "\n\nNo XDATA found on this entity.")
+        (progn
+          ;; xd-section: (-3 ("APP1" (1000 . "val") ...) ("APP2" ...) ...)
+          (foreach app-entry (cdr xd-section)
+            (setq app-name (car app-entry))
+            (setq pairs    (cdr app-entry))
+            (princ (strcat "\n\n--- XDATA app: " app-name " ---"))
+            (setq idx 0)
+            (foreach pair pairs
+              (setq gcode (car pair))
+              (setq gval  (cdr pair))
+              (princ
+                (strcat "\n  [" (itoa idx) "] "
+                        (itoa gcode) " : "
+                        (cond
+                          ((= gcode 1000) (strcat "\"" gval "\""))
+                          ((= gcode 1001) (strcat "APP=" gval))
+                          ((= gcode 1002) (strcat "{" gval "}"))
+                          ((= gcode 1003) (strcat "layer=" gval))
+                          ((= gcode 1004) (strcat "bin=" gval))
+                          ((= gcode 1005) (strcat "handle=" gval))
+                          ((= gcode 1010)
+                           (strcat "pt=(" (rtos (car gval) 2 4) ","
+                                          (rtos (cadr gval) 2 4) ","
+                                          (rtos (caddr gval) 2 4) ")"))
+                          ((= gcode 1040) (rtos gval 2 6))
+                          ((= gcode 1070) (itoa gval))
+                          ((= gcode 1071) (itoa gval))
+                          (T              (vl-prin1-to-string gval))
+                        )
+                )
+              )
+              (setq idx (1+ idx))
+            )
+          )
+        )
+      )
+
+      ;; Also dump attributes if block has any
+      (setq att-ent (entnext ent))
+      (if (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
+        (progn
+          (princ "\n\n--- Block Attributes ---")
+          (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
+            (setq att-data (entget att-ent))
+            (princ (strcat "\n  Tag=" (cdr (assoc 2 att-data))
+                           "  Value=\"" (cdr (assoc 1 att-data)) "\""))
+            (setq att-ent (entnext att-ent))
+          )
+        )
+      )
+
+      (princ "\n\n=== END DUMP ===\n")
+    )
   )
   (princ)
 )
