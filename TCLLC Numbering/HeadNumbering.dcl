@@ -3,7 +3,7 @@
 // ========================================================================
 
 HeadNumDialog : dialog {
-  label = "Head Numbering Settings";
+  label = "TCLLC Head Numbering";
   initial_focus = "hole_list";
 
   : row {
@@ -24,32 +24,31 @@ HeadNumDialog : dialog {
     }
   }
 
-  : row {
-    : text {
-      key = "placed_label";
-      label = "Already placed:";
-      alignment = left;
-    }
+  : boxed_column {
+    label = "Already placed:";
+
     : text {
       key = "gap_label";
       label = "";
-      alignment = right;
-      width = 16;
+      alignment = centered;
     }
-  }
 
-  : list_box {
-    key = "tag_list";
-    width = 30;
-    height = 8;
-    allow_accept = false;
-    multiple_select = false;
-  }
+    : list_box {
+      key = "tag_list";
+      width = 30;
+      height = 8;
+      allow_accept = false;
+      multiple_select = false;
+    }
 
-  : text {
-    key = "next_label";
-    label = "";
-    alignment = left;
+    : boxed_column {
+      label = "Next No.:";
+      : row {
+        : text { key = "num_prefix"; label = ""; width = 5; }
+        : edit_box { key = "override_num"; width = 5; }
+        : button { key = "clear_num_btn"; label = "Auto"; fixed_width = true; width = 6; }
+      }
+    }
   }
 
   : row {

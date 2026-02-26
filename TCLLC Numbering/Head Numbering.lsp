@@ -429,9 +429,7 @@
         (progn
           (setq m-hole (car manual-settings))
           (setq m-loc  (cadr manual-settings))
-          (setq m-num  (if (caddr manual-settings)
-                         (caddr manual-settings)
-                         (1+ (GetCounter m-hole m-loc))))
+          (setq m-num  (caddr manual-settings))
           (setq m-label (strcat (FormatHoleNumber m-hole) m-loc (FormatNumber m-num)))
           ; Check collision at manual target
           (if (TagExists m-hole m-loc m-num)
@@ -714,8 +712,8 @@
       (T               "** Gaps Exist **")
     )
   )
-  (set_tile "next_label"
-    (strcat "Auto next: " (FormatHoleNumber hole) location (FormatNumber next-num)))
+  (set_tile "num_prefix" (strcat (FormatHoleNumber hole) location))
+  (set_tile "override_num" (FormatNumber next-num))
   (mode_tile "fill_gaps_btn" (if (> gap-count 0) 0 1))
 )
 
@@ -1004,7 +1002,7 @@
                   (setq N-str    (rtos (cadr head-pos) 2 4))
                   (setq desc-str (GetHeadDescStr head-ent))
                   (setq rows (append rows
-                    (list (list (FormatNumber num) N-str E-str "0" desc-str))
+                    (list (list (strcat (FormatHoleNumber hole) loc (FormatNumber num)) N-str E-str "0" desc-str))
                   ))
                 )
               )
@@ -1283,10 +1281,8 @@
 )
 
 (defun ShowSettingsDialog (current-hole current-location / dcl-path dcl_id hole-choice location-choice
-                            result list-items selected-idx selected-str gap-num override-number)
+                            result list-items selected-idx selected-str chosen-num)
   "Display DCL dialog and return (hole location override-number)"
-
-  (setq override-number nil)
 
   (if (null *HN-DIR*)
     (progn
@@ -1338,10 +1334,9 @@
     (nth (atoi location-choice) *HN-Locations*)
   )
 
-  ; When hole changes - refresh list, clear override, refresh status
+  ; When hole changes - refresh list and status (HN-RefreshStatus repopulates override_num)
   (action_tile "hole_list"
     "(setq hole-choice $value)
-     (setq override-number nil)
      (setq list-items (RefreshTagList
        (1+ (atoi hole-choice))
        (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
@@ -1352,10 +1347,9 @@
      )"
   )
 
-  ; When location changes - refresh list, clear override, refresh status
+  ; When location changes - refresh list and status
   (action_tile "location_list"
     "(setq location-choice $value)
-     (setq override-number nil)
      (setq list-items (RefreshTagList
        (1+ (atoi (get_tile \"hole_list\")))
        (nth (atoi location-choice) *HN-Locations*)
@@ -1366,23 +1360,20 @@
      )"
   )
 
-  ; When list item clicked - react to GAP lines, restore auto-next for others
+  ; When list item clicked - set override_num to that number (formatted, e.g. "007")
   (action_tile "tag_list"
     "(setq selected-idx (atoi $value))
      (setq selected-str (nth selected-idx list-items))
-     (if (and selected-str (vl-string-search \"GAP\" selected-str))
-       (progn
-         (setq gap-num (atoi (substr selected-str 5 3)))
-         (setq override-number gap-num)
-         (set_tile \"next_label\" (strcat \"Will fill: \" (substr selected-str 1 7)))
-       )
-       (progn
-         (setq override-number nil)
-         (HN-RefreshStatus
-           (1+ (atoi (get_tile \"hole_list\")))
-           (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-         )
-       )
+     (if selected-str
+       (set_tile \"override_num\" (substr selected-str 5 3))
+     )"
+  )
+
+  ; Auto button - restore auto-next number via HN-RefreshStatus
+  (action_tile "clear_num_btn"
+    "(HN-RefreshStatus
+       (1+ (atoi (get_tile \"hole_list\")))
+       (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
      )"
   )
   
@@ -1393,7 +1384,6 @@
          (1+ (atoi (get_tile \"hole_list\")))
          (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
        )
-       (setq override-number nil)
        (setq list-items (RefreshTagList
          (1+ (atoi (get_tile \"hole_list\")))
          (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
@@ -1408,10 +1398,11 @@
   ; Export button — opens sub-dialog to select areas and run export
   (action_tile "export_btn" "(HN-RunExportDialog)")
 
-  ; OK button
+  ; OK button - capture all values before dialog closes
   (action_tile "accept"
     "(setq hole-choice (get_tile \"hole_list\"))
      (setq location-choice (get_tile \"location_list\"))
+     (setq chosen-num (get_tile \"override_num\"))
      (done_dialog 1)"
   )
   (action_tile "cancel" "(done_dialog 0)")
@@ -1423,7 +1414,7 @@
     (list
       (1+ (atoi hole-choice))
       (nth (atoi location-choice) *HN-Locations*)
-      override-number  ; nil if no gap selected, number if gap clicked
+      (atoi chosen-num)  ; captured in accept action before dialog closed
     )
     nil
   )
@@ -1435,7 +1426,7 @@
 
 (defun c:NUMBERHEADS (/ settings current-hole current-location current-number existing-tags
                         head-ent head-handle head-pt tag-ent place-pt existing-tag
-                        user-input parent-list manual-num response highest collision-response done
+                        user-input parent-list response highest collision-response done
                         sel-ent sel-type)
   
   (princ "\n=== HEAD NUMBERING ROUTINE ===")
@@ -1463,11 +1454,7 @@
     )
   )
   
-  ; Use gap override if selected in dialog, otherwise next auto number (skipping occupied slots)
-  (if (caddr settings)
-    (setq current-number (caddr settings))
-    (setq current-number (NextAvailable current-hole current-location (1+ (GetCounter current-hole current-location))))
-  )
+  (setq current-number (caddr settings))
   
   (princ (strcat "\nHole: " (itoa current-hole) " | Location: " current-location))
   (princ (strcat "\nNext number: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
@@ -1488,42 +1475,18 @@
         (HN-ToggleSprayers)
       )
 
-      ; User typed "Manual" keyword
+      ; User typed "Manual" keyword - open dialog to set next number
       ((or (= user-input "Manual") (= user-input "M"))
-        (princ "\nManual number entry...")
-        (setq manual-num (getint (strcat "\nEnter number (current next: " (itoa current-number) "): ")))
-        
-        (if manual-num
+        (if (setq settings (ShowSettingsDialog current-hole current-location))
           (progn
-            ; Check if this number already exists
-            (if (TagExists current-hole current-location manual-num)
-              (progn
-                (princ (strcat "\nWARNING: " (FormatHoleNumber current-hole) current-location (FormatNumber manual-num) " already exists!"))
-                (initget "Yes No")
-                (setq response (getkword "\nRenumber existing tags? [Yes/No] <No>: "))
-                
-                (if (= response "Yes")
-                  (progn
-                    (princ (strcat "\nAbout to renumber tags >= " (itoa manual-num)))
-                    ; Renumber all tags >= manual-num (updates counter internally)
-                    (RenumberTags current-hole current-location manual-num)
-                    ; Set current number to the manual number user chose
-                    (setq current-number manual-num)
-                    (princ (strcat "\nCurrent number set to: " (itoa current-number)))
-                    (princ (strcat "\nCounter is now: " (itoa (GetCounter current-hole current-location))))
-                    (princ (strcat "\nReady to place: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
-                  )
-                  (princ "\nManual number cancelled.")
-                )
-              )
-              (progn
-                ; Number doesn't exist, safe to use
-                (setq current-number manual-num)
-                (princ (strcat "\nManual number set to: " (itoa manual-num)))
-              )
-            )
+            (setq current-hole     (car settings))
+            (setq current-location (cadr settings))
+            (setq *HN-LastHole*     current-hole)
+            (setq *HN-LastLocation* current-location)
+            (setq current-number (caddr settings))
+            (princ (strcat "\nNext: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
           )
-          (princ "\nManual number cancelled.")
+          (princ "\nCancelled.")
         )
       )
       
@@ -1536,10 +1499,7 @@
             (setq current-location (cadr settings))
             (setq *HN-LastHole*     current-hole)
             (setq *HN-LastLocation* current-location)
-            (if (caddr settings)
-              (setq current-number (caddr settings))
-              (setq current-number (NextAvailable current-hole current-location (1+ (GetCounter current-hole current-location))))
-            )
+            (setq current-number (caddr settings))
             (princ (strcat "\nSwitched to Hole: " (itoa current-hole) " | Location: " current-location))
             (princ (strcat "\nNext number: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
           )
@@ -1647,11 +1607,7 @@
 (princ "\nUtilities:")
 (princ "\n  FINDTAG            - Click a head to find and highlight its tag")
 (princ "\n  FINDHEAD           - Click a tag to find and highlight its linked head")
-(princ "\n  REPAIRHEADTAGS     - Backfill XDATA on old tags missing it")
-(princ "\n  REPAIRATTRIBUTES   - Fix blank attribute values using XDATA")
-(princ "\n  STRIPLFXDATA       - Remove LandFX XDATA so LFX stops resetting attributes")
 (princ "\n  EXPORTHEADS        - Export head locations to PNEZD CSV per location")
-(princ "\n  DUMPHEADXDATA      - Dump all XDATA from a head block (diagnostic)")
 (princ "\nBlock required: LAFX-TAG-SQUARE-999 (with XX attribute)")
 (princ "\n==========================================\n")
 (princ)
@@ -1659,274 +1615,6 @@
 ;;; ------------------------------------------------------------------------
 ;;; UTILITY COMMANDS - FIND TAG/HEAD
 ;;; ------------------------------------------------------------------------
-
-;;; ------------------------------------------------------------------------
-;;; REPAIRHEADTAGS - Backfill missing XDATA on LAFX-TAG-SQUARE-999 blocks
-;;; ------------------------------------------------------------------------
-;;; Use this to fix older LAFX-TAG-SQUARE-999 blocks placed before LandFX XDATA was
-;;; added to the routine. Parses the attribute value to rebuild XDATA.
-;;; Only processes tags that have no existing XDATA.
-;;; ------------------------------------------------------------------------
-
-(defun ParseHeadNumber (text / hole-str loc-str num-str i j)
-  "Parse attribute text like '03FW007' into (hole location number-string)"
-  (setq i 0)
-  ; Scan past leading digits (hole number)
-  (while (and (< i (strlen text))
-              (wcmatch (substr text (1+ i) 1) "#"))
-    (setq i (1+ i))
-  )
-  (if (= i 0) (progn (setq ParseHeadNumber-result nil) nil)
-    (progn
-      (setq hole-str (substr text 1 i))
-      (setq j i)
-      ; Scan past letters (location code)
-      (while (and (< j (strlen text))
-                  (not (wcmatch (substr text (1+ j) 1) "#")))
-        (setq j (1+ j))
-      )
-      (if (= j i) nil
-        (progn
-          (setq loc-str (substr text (1+ i) (- j i)))
-          (setq num-str (substr text (1+ j)))
-          (if (and (> (strlen hole-str) 0)
-                   (> (strlen loc-str) 0)
-                   (> (strlen num-str) 0))
-            (list (atoi hole-str) loc-str num-str)
-            nil
-          )
-        )
-      )
-    )
-  )
-)
-
-(defun c:REPAIRHEADTAGS (/ ss i ent ent-data att-ent att-data att-val parsed
-                            hole loc num fixed skipped)
-  "Backfill HEADNUM and LandFX XDATA on LAFX-TAG-SQUARE-999 blocks that are missing it"
-  
-  (princ "\n=== REPAIR HEAD TAG XDATA ===")
-  (princ "\nScanning for LAFX-TAG-SQUARE-999 blocks with missing XDATA...\n")
-  
-  (setq fixed 0 skipped 0)
-  
-  (regapp "HEADNUM")
-  (regapp "LandFX")
-  
-  (if (not (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999")))))
-    (progn (princ "\nNo LAFX-TAG-SQUARE-999 blocks found.") (exit))
-  )
-  
-  (setq i 0)
-  (repeat (sslength ss)
-    (setq ent (ssname ss i))
-    (setq ent-data (entget ent '("HEADNUM" "LandFX")))
-    
-    ; Only process blocks with no existing XDATA
-    (if (not (assoc -3 ent-data))
-      (progn
-        ; Get attribute value
-        (setq att-val nil)
-        (setq att-ent (entnext ent))
-        (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (setq att-data (entget att-ent))))))
-          (if (= "XX" (cdr (assoc 2 att-data)))
-            (setq att-val (cdr (assoc 1 att-data)))
-          )
-          (setq att-ent (entnext att-ent))
-        )
-        
-        (if (and att-val (> (strlen att-val) 0))
-          (progn
-            (setq parsed (ParseHeadNumber att-val))
-            (if parsed
-              (progn
-                (setq hole (car parsed))
-                (setq loc  (cadr parsed))
-                (setq num  (caddr parsed))
-                
-                (princ (strcat "\nRepairing: [" att-val "]"))
-                
-                ; Write HEADNUM XDATA (no 1005 - head link is lost for old tags)
-                (setq ent-data (vl-remove-if '(lambda (x) (= (car x) -3)) ent-data))
-                (setq ent-data 
-                  (append ent-data 
-                    (list 
-                      (list -3 
-                        (list "HEADNUM"
-                          (cons 1000 (itoa hole))
-                          (cons 1000 loc)
-                          (cons 1000 num)
-                        )
-                        (list "LandFX"
-                          '(1000 . "VALVECALLOUT")
-                        )
-                      )
-                    )
-                  )
-                )
-                (entmod ent-data)
-                (entupd ent)
-                (setq fixed (1+ fixed))
-              )
-              (progn
-                (princ (strcat "\nSkipping: [" att-val "] - cannot parse"))
-                (setq skipped (1+ skipped))
-              )
-            )
-          )
-          (progn
-            (princ (strcat "\nSkipping: handle " (cdr (assoc 5 ent-data)) " - no attribute value"))
-            (setq skipped (1+ skipped))
-          )
-        )
-      )
-    )
-    (setq i (1+ i))
-  )
-  
-  (princ (strcat "\n\n=== REPAIR COMPLETE ==="))
-  (princ (strcat "\nRepaired: " (itoa fixed)))
-  (princ (strcat "\nSkipped:  " (itoa skipped)))
-  (if (> fixed 0)
-    (princ "\n\nNOTE: Repaired tags have no 1005 head link (lost for old tags).")
-  )
-  (princ)
-)
-
-;;; ------------------------------------------------------------------------
-;;; REPAIRATTRIBUTES - Fix blank attribute values on LAFX-TAG-SQUARE-999 blocks
-;;; ------------------------------------------------------------------------
-;;; For tags that have correct XDATA but a blank XX attribute value.
-;;; Rebuilds the display text from the HEADNUM XDATA.
-;;; ------------------------------------------------------------------------
-
-(defun c:REPAIRATTRIBUTES (/ ss i ent ent-data xdata xdata-vals hole-str loc-str num-str
-                              new-text att-ent att-data fixed skipped)
-  "Fix LAFX-TAG-SQUARE-999 blocks that have XDATA but blank attribute value"
-  
-  (princ "\n=== REPAIR HEAD TAG ATTRIBUTES ===")
-  (princ "\nScanning for LAFX-TAG-SQUARE-999 blocks with blank attributes...\n")
-  
-  (setq fixed 0 skipped 0)
-  
-  (if (not (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999")))))
-    (progn (princ "\nNo LAFX-TAG-SQUARE-999 blocks found.") (exit))
-  )
-  
-  (setq i 0)
-  (repeat (sslength ss)
-    (setq ent (ssname ss i))
-    (setq ent-data (entget ent '("HEADNUM")))
-    
-    ; Only process blocks that have HEADNUM XDATA
-    (if (setq xdata (assoc -3 ent-data))
-      (progn
-        (setq xdata-vals (cdr (assoc "HEADNUM" (cdr xdata))))
-        
-        (if xdata-vals
-          (progn
-            ; Extract hole/location/number from XDATA
-            (setq hole-str (cdr (nth 0 xdata-vals)))
-            (setq loc-str  (cdr (nth 1 xdata-vals)))
-            (setq num-str  (cdr (nth 2 xdata-vals)))
-            
-            ; Build the display text
-            (setq new-text (strcat (FormatHoleNumber (atoi hole-str)) loc-str num-str))
-            
-            ; Find the XX attribute
-            (setq att-ent (entnext ent))
-            (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (setq att-data (entget att-ent))))))
-              (if (= "XX" (cdr (assoc 2 att-data)))
-                (progn
-                  (setq current-val (cdr (assoc 1 att-data)))
-                  ; Only fix if blank
-                  (if (or (not current-val) (= current-val "") (= (strlen current-val) 0))
-                    (progn
-                      (princ (strcat "\nFixing: handle " (cdr (assoc 5 ent-data)) 
-                        " -> [" new-text "]"))
-                      (entmod (subst (cons 1 new-text) (assoc 1 att-data) att-data))
-                      (entupd att-ent)
-                      (entupd ent)
-                      (setq fixed (1+ fixed))
-                    )
-                    (setq skipped (1+ skipped))  ; Already has a value
-                  )
-                )
-              )
-              (setq att-ent (entnext att-ent))
-            )
-          )
-          (setq skipped (1+ skipped))
-        )
-      )
-    )
-    (setq i (1+ i))
-  )
-  
-  (princ (strcat "\n\n=== REPAIR COMPLETE ==="))
-  (princ (strcat "\nFixed:   " (itoa fixed)))
-  (princ (strcat "\nSkipped: " (itoa skipped) " (already had values or no XDATA)"))
-  (princ)
-)
-
-;;; ------------------------------------------------------------------------
-;;; STRIPLFXDATA - Remove LandFX XDATA from all LAFX-TAG-SQUARE-999 blocks
-;;; ------------------------------------------------------------------------
-;;; LFX detects its own app name on non-LAFX blocks and resets their
-;;; attributes. This strips the LandFX XDATA entry from LAFX-TAG-SQUARE-999 blocks
-;;; so LFX leaves them alone entirely.
-;;; ------------------------------------------------------------------------
-
-(defun c:STRIPLFXDATA (/ ss i ent ent-data xdata-section new-xdata-apps stripped skipped)
-  "Remove LandFX XDATA from LAFX-TAG-SQUARE-999 blocks to prevent LFX from resetting them"
-  
-  (princ "\n=== STRIP LANDFX XDATA FROM LAFX-TAG-SQUARE-999 BLOCKS ===\n")
-  
-  (setq stripped 0 skipped 0)
-  
-  (if (not (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999")))))
-    (progn (princ "\nNo LAFX-TAG-SQUARE-999 blocks found.") (exit))
-  )
-  
-  (setq i 0)
-  (repeat (sslength ss)
-    (setq ent (ssname ss i))
-    (setq ent-data (entget ent '("LandFX")))
-    
-    (if (setq xdata-section (assoc -3 ent-data))
-      (progn
-        ; Rebuild XDATA list without the LandFX app entry
-        (setq new-xdata-apps 
-          (vl-remove-if 
-            '(lambda (app) (= (car app) "LandFX")) 
-            (cdr xdata-section)
-          )
-        )
-        
-        ; Remove old XDATA from entity data
-        (setq ent-data (vl-remove-if '(lambda (x) (= (car x) -3)) ent-data))
-        
-        ; Add back only if there are other apps remaining
-        (if new-xdata-apps
-          (setq ent-data (append ent-data (list (cons -3 new-xdata-apps))))
-        )
-        
-        (entmod ent-data)
-        (entupd ent)
-        (princ (strcat "\nStripped LandFX XDATA from handle " (cdr (assoc 5 ent-data))))
-        (setq stripped (1+ stripped))
-      )
-      (setq skipped (1+ skipped))
-    )
-    (setq i (1+ i))
-  )
-  
-  (princ (strcat "\n\n=== COMPLETE ==="))
-  (princ (strcat "\nStripped: " (itoa stripped)))
-  (princ (strcat "\nSkipped (none found): " (itoa skipped)))
-  (princ "\n\nRun REPAIRATTRIBUTES next to fix any blanked attribute values.")
-  (princ)
-)
 
 (defun c:FINDTAG (/ head-sel head-ent tag-ent tag-data hole loc num ss i xdata xdata-app xdata-vals xdata-section handle-pair head-handle parent-list test-tag att-ent att-val)
   "Click a head block to find and highlight its linked tag (LAFX-TAG-SQUARE-999 or LAFX-TAG)"
@@ -2489,89 +2177,3 @@
   (princ)
 )
 
-;;; ------------------------------------------------------------------------
-;;; DUMPHEADXDATA — Diagnostic: dump all XDATA from a selected head block
-;;; Use this to map field indices for Model / Nozzle before writing EXPORTHEADS
-;;; ------------------------------------------------------------------------
-
-(defun c:DUMPHEADXDATA (/ sel ent ename blkname pos xdata xd-section app-entry app-name pairs idx pair gcode gval att-ent att-data)
-  "Click a head block (VIH rotor or any LAFX head) to dump all XDATA fields to the command line."
-
-  (setq sel (entsel "\nSelect a head block: "))
-
-  (if (null sel)
-    (princ "\nNo selection.")
-    (progn
-      (setq ent     (car sel))
-      (setq ename   (entget ent))
-      (setq blkname (cdr (assoc 2 ename)))
-      (setq pos     (cdr (assoc 10 ename)))
-
-      (princ "\n\n=== DUMPHEADXDATA ===")
-      (princ (strcat "\nBlock name : " blkname))
-      (if pos
-        (princ (strcat "\nInsertion  : " (rtos (car pos) 2 6) " , " (rtos (cadr pos) 2 6)))
-      )
-
-      ;; Grab XDATA from ALL registered apps
-      (setq xdata      (entget ent '("*")))
-      (setq xd-section (assoc -3 xdata))
-
-      (if (null xd-section)
-        (princ "\n\nNo XDATA found on this entity.")
-        (progn
-          ;; xd-section: (-3 ("APP1" (1000 . "val") ...) ("APP2" ...) ...)
-          (foreach app-entry (cdr xd-section)
-            (setq app-name (car app-entry))
-            (setq pairs    (cdr app-entry))
-            (princ (strcat "\n\n--- XDATA app: " app-name " ---"))
-            (setq idx 0)
-            (foreach pair pairs
-              (setq gcode (car pair))
-              (setq gval  (cdr pair))
-              (princ
-                (strcat "\n  [" (itoa idx) "] "
-                        (itoa gcode) " : "
-                        (cond
-                          ((= gcode 1000) (strcat "\"" gval "\""))
-                          ((= gcode 1001) (strcat "APP=" gval))
-                          ((= gcode 1002) (strcat "{" gval "}"))
-                          ((= gcode 1003) (strcat "layer=" gval))
-                          ((= gcode 1004) (strcat "bin=" gval))
-                          ((= gcode 1005) (strcat "handle=" gval))
-                          ((= gcode 1010)
-                           (strcat "pt=(" (rtos (car gval) 2 4) ","
-                                          (rtos (cadr gval) 2 4) ","
-                                          (rtos (caddr gval) 2 4) ")"))
-                          ((= gcode 1040) (rtos gval 2 6))
-                          ((= gcode 1070) (itoa gval))
-                          ((= gcode 1071) (itoa gval))
-                          (T              (vl-prin1-to-string gval))
-                        )
-                )
-              )
-              (setq idx (1+ idx))
-            )
-          )
-        )
-      )
-
-      ;; Also dump attributes if block has any
-      (setq att-ent (entnext ent))
-      (if (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
-        (progn
-          (princ "\n\n--- Block Attributes ---")
-          (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
-            (setq att-data (entget att-ent))
-            (princ (strcat "\n  Tag=" (cdr (assoc 2 att-data))
-                           "  Value=\"" (cdr (assoc 1 att-data)) "\""))
-            (setq att-ent (entnext att-ent))
-          )
-        )
-      )
-
-      (princ "\n\n=== END DUMP ===\n")
-    )
-  )
-  (princ)
-)
