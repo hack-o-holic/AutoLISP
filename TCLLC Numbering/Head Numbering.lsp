@@ -14,19 +14,19 @@
 ;;; - Mid-stream settings change
 ;;; ========================================================================
 
-;;; ------------------------------------------------------------------------
-;;; CONFIGURATION
-;;; ------------------------------------------------------------------------
+;;; --- CONFIGURATION ---
 
 (setq *HN-Locations*     '("TE" "FW" "FP" "RG" "GR" "GP"))
 (setq *HN-MaxHole*       27)
-(setq *HN-DIR*           (vl-filename-directory (findfile "Head Numbering.lsp")))
+(setq *HN-DIR*
+  (cond
+    ((findfile "Head Numbering.lsp") (vl-filename-directory (findfile "Head Numbering.lsp")))
+    ((findfile "HeadNumbering.dcl")  (vl-filename-directory (findfile "HeadNumbering.dcl")))
+    (T nil)))
 (if (not *HN-LastHole*)     (setq *HN-LastHole*     nil))
 (if (not *HN-LastLocation*) (setq *HN-LastLocation* nil))
 
-;;; ------------------------------------------------------------------------
-;;; DICTIONARY MANAGEMENT FUNCTIONS
-;;; ------------------------------------------------------------------------
+;;; --- DICTIONARY MANAGEMENT ---
 
 (defun GetCounterDict (/ dict-main dict-counters)
   "Get or create the HEADNUM counter dictionary"
@@ -41,151 +41,84 @@
   dict-counters
 )
 
-(defun GetCounter (hole location / dict-counters key xrec data value)
-  "Get current counter value for hole/location combo"
-  (setq dict-counters (GetCounterDict))
-  (setq key (strcat (itoa hole) "_" location))
-  
-  (if (setq xrec (dictsearch dict-counters key))
-    (progn
-      (setq data (cdr (assoc -1 xrec)))
-      (setq value (cdr (assoc 1 (entget data))))
-      (if value
-        (atoi value)
-        0
-      )
-    )
-    0  ; Return 0 if counter doesn't exist yet
-  )
+(defun GetCounter (hole location / dict key rec)
+  (setq dict (GetCounterDict)
+        key  (strcat (itoa hole) "_" location))
+  (if (and (setq rec (dictsearch dict key))
+           (setq rec (cdr (assoc 1 (entget (cdr (assoc -1 rec)))))))
+    (atoi rec)
+    0)
 )
 
-(defun SetCounter (hole location value / dict-counters key xrec old-data)
-  "Set counter value for hole/location combo"
-  (setq dict-counters (GetCounterDict))
-  (setq key (strcat (itoa hole) "_" location))
-  
-  ; If counter exists, delete it first
-  (if (setq xrec (dictsearch dict-counters key))
-    (progn
-      (setq old-data (cdr (assoc -1 xrec)))
-      (entdel old-data)
-      (dictremove dict-counters key)
-    )
+(defun SetCounter (hole location value / dict key xrec)
+  (setq dict (GetCounterDict)
+        key  (strcat (itoa hole) "_" location))
+  (if (setq xrec (dictsearch dict key))
+    (progn (entdel (cdr (assoc -1 xrec))) (dictremove dict key))
   )
-  
-  ; Create new counter
-  (setq new-data (entmakex (list (cons 0 "XRECORD") (cons 100 "AcDbXrecord") (cons 1 (itoa value)))))
-  (dictadd dict-counters key new-data)
-  
+  (dictadd dict key (entmakex (list (cons 0 "XRECORD") (cons 100 "AcDbXrecord") (cons 1 (itoa value)))))
   value
 )
 
-(defun SyncCounter (hole location / tags max-num)
-  "Recalculate the counter from actual tags in the drawing. Returns the new max."
-  (setq tags (GetAllHeadTags hole location))
-  (setq max-num 0)
-  (foreach tag tags
-    (if (> (cadr tag) max-num)
-      (setq max-num (cadr tag))
-    )
-  )
-  (SetCounter hole location max-num)
-  max-num
+(defun SyncCounter (hole location / tags max-n)
+  (setq tags  (GetAllHeadTags hole location)
+        max-n (if tags (apply 'max (mapcar 'cadr tags)) 0))
+  (SetCounter hole location max-n)
+  max-n
 )
 
-(defun NextAvailable (hole location start / tags nums n)
-  "Return the first number >= start that has no existing tag."
-  (setq tags (GetAllHeadTags hole location))
-  (setq nums (mapcar 'cadr tags))
-  (setq n start)
-  (while (member n nums)
-    (setq n (1+ n))
-  )
+(defun NextAvailable (hole location start / nums n)
+  (setq nums (mapcar 'cadr (GetAllHeadTags hole location))
+        n    start)
+  (while (member n nums) (setq n (1+ n)))
   n
 )
 
-;;; ------------------------------------------------------------------------
-;;; TAG SEARCH AND MANIPULATION FUNCTIONS
-;;; ------------------------------------------------------------------------
+;;; --- TAG SEARCH AND MANIPULATION ---
 
-(defun HeadHasTag (head-ent / head-handle ss i tag-ent xdata xdata-app xdata-vals handle-pair found)
+(defun HeadHasTag (head-ent / head-handle ss i tag-ent info found)
   "Check if a head block already has a tag linked to it"
   (setq head-handle (cdr (assoc 5 (entget head-ent))))
   (setq found nil)
-  
-  ; Search all LAFX-TAG-SQUARE-999 blocks
   (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999"))))
     (progn
       (setq i 0)
       (while (and (< i (sslength ss)) (not found))
         (setq tag-ent (ssname ss i))
-        
-        ; Get XDATA
-        (if (setq xdata (assoc -3 (entget tag-ent '("HEADNUM"))))
-          (progn
-            (setq xdata-app (assoc "HEADNUM" (cdr xdata)))
-            (if xdata-app
-              (progn
-                ; Look for 1005 group code (handle reference)
-                (setq xdata-vals (cdr xdata-app))
-                (if (setq handle-pair (assoc 1005 xdata-vals))
-                  (if (equal (cdr handle-pair) head-handle)
-                    (setq found tag-ent)
-                  )
-                )
-              )
-            )
+        (if (setq info (HN-GetTagInfo tag-ent))
+          (if (equal (nth 3 info) head-handle)
+            (setq found tag-ent)
           )
         )
-        
         (setq i (1+ i))
       )
     )
   )
-  
-  found  ; Return the tag entity if found, nil otherwise
+  found
 )
 
-(defun GetAllHeadTags (hole location / ss i ent xdata tags hole-str loc-str num-str valid-ent)
+(defun GetAllHeadTags (hole location / ss i ent info tags)
   "Get all LAFX-TAG-SQUARE-999 blocks for specific hole/location combo"
   (setq tags '())
-  
   (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(2 . "LAFX-TAG-SQUARE-999"))))
     (progn
       (setq i 0)
       (repeat (sslength ss)
         (setq ent (ssname ss i))
-        
-        ; Verify entity still exists
-        (if (and ent (setq valid-ent (entget ent)))
-          (if (setq xdata (assoc -3 (entget ent '("HEADNUM"))))
-            (progn
-              (setq xdata (cdr xdata))
-              (setq xdata (cdr (assoc "HEADNUM" xdata)))
-              
-              ; Extract hole, location, number from XDATA
-              (setq hole-str (cdr (nth 0 xdata)))
-              (setq loc-str (cdr (nth 1 xdata)))
-              (setq num-str (cdr (nth 2 xdata)))
-              
-              ; Check if matches our hole/location
-              (if (and (= (atoi hole-str) hole) (= loc-str location))
-                (setq tags (append tags (list (list ent (atoi num-str)))))
-              )
-            )
+        (if (setq info (HN-GetTagInfo ent))
+          (if (and (= (atoi (car info)) hole) (= (cadr info) location))
+            (setq tags (append tags (list (list ent (atoi (caddr info))))))
           )
         )
         (setq i (1+ i))
       )
     )
   )
-  tags  ; Returns list of (entity_name . number) pairs
+  tags
 )
 
-(defun TagExists (hole location number / tags)
-  "Check if a specific tag number exists"
-  (setq tags (GetAllHeadTags hole location))
-  (vl-some '(lambda (x) (= (cadr x) number)) tags)
+(defun TagExists (hole location number)
+  (vl-some '(lambda (x) (= (cadr x) number)) (GetAllHeadTags hole location))
 )
 
 (defun RenumberTags (hole location start-num / tags-to-renumber tag ent num new-num xdata highest-num)
@@ -256,23 +189,13 @@
   )
 )
 
-(defun GetHeadHandleFromTag (tag-ent / xdata)
-  "Extract linked head handle from tag XDATA"
-  (if (setq xdata (assoc -3 (entget tag-ent '("HEADNUM"))))
-    (progn
-      (setq xdata (cdr xdata))
-      (setq xdata (cdr (assoc "HEADNUM" xdata)))
-      (cdr (nth 3 xdata))  ; 4th item is the handle
-    )
-    nil
-  )
+(defun GetHeadHandleFromTag (tag-ent / info)
+  (if (setq info (HN-GetTagInfo tag-ent)) (nth 3 info))
 )
 
-;;; ------------------------------------------------------------------------
-;;; TAG CREATION AND UPDATE FUNCTIONS
-;;; ------------------------------------------------------------------------
+;;; --- TAG CREATION AND UPDATE ---
 
-(defun UpdateTagNumber (tag-ent hole location number head-handle / ent-data att-ent att-data new-text temp-data xdata-list)
+(defun UpdateTagNumber (tag-ent hole location number head-handle / ent-data att-ent att-data new-text)
   "Update tag block's attribute and XDATA"
   
   ; Format the display text with padded hole number
@@ -327,22 +250,17 @@
   T
 )
 
-(defun ClassifySelection (ent / xdata lfx-data first-1000)
+(defun ClassifySelection (ent / lfx-vals first-1000)
   "Classify a selected entity based on LandFX XDATA first 1000 field.
    Returns: 'HEAD, 'OURTAG, 'LFXTAG, or 'UNKNOWN"
-  (setq xdata (entget ent '("HEADNUM" "LandFX")))
-  (setq lfx-data (assoc "LandFX" (cdr (assoc -3 xdata))))
-  
-  (if lfx-data
+  (setq lfx-vals (HN-GetLFXVals ent))
+  (if lfx-vals
     (progn
-      ; Get first 1000 string value
-      (setq first-1000 (cdr (assoc 1000 (cdr lfx-data))))
+      (setq first-1000 (cdr (assoc 1000 lfx-vals)))
       (cond
-        ; It's a head block
         ((= first-1000 "Head") 'HEAD)
-        ; It's a tag (ours or LandFX) - check for HEADNUM to distinguish
         ((= first-1000 "VALVECALLOUT")
-          (if (assoc "HEADNUM" (cdr (assoc -3 xdata)))
+          (if (HN-GetTagInfo ent)
             'OURTAG
             'LFXTAG
           )
@@ -354,9 +272,24 @@
   )
 )
 
+(defun HN-CheckCollision (hole loc num label)
+  "Returns T if safe to proceed (no collision, or collision and user approved renumber), nil if cancelled."
+  (if (TagExists hole loc num)
+    (progn
+      (princ (strcat "\nWARNING: " label " already exists!"))
+      (initget "Yes No")
+      (if (= (getkword "\nRenumber existing tags to make room? [Yes/No] <No>: ") "Yes")
+        (progn (RenumberTags hole loc num) T)
+        nil
+      )
+    )
+    T
+  )
+)
+
 (defun ReplaceHeadTag (existing-tag hole location number head-ent
                        / xdata xdata-vals old-hole old-loc old-num old-label new-label
-                         head-handle response collision-response
+                         head-handle response
                          manual-settings m-hole m-loc m-num m-label)
   "Renumber an existing tag in place - highlight it, prompt to confirm, check collisions.
    Returns T on Yes renumber, 'MANUAL on manual reassign, nil on skip/cancel."
@@ -391,19 +324,8 @@
     ; -------------------------------------------------------
     ((= response "Yes")
       ; Check if new number already exists on a DIFFERENT tag
-      (if (TagExists hole location number)
-        (progn
-          (princ (strcat "\nWARNING: " new-label " already exists!"))
-          (initget "Yes No")
-          (setq collision-response (getkword "\nRenumber existing tags to make room? [Yes/No] <No>: "))
-          (if (= collision-response "Yes")
-            (RenumberTags hole location number)
-            (progn
-              (princ "\nRenumber cancelled.")
-              (setq response nil)
-            )
-          )
-        )
+      (if (not (HN-CheckCollision hole location number new-label))
+        (progn (princ "\nRenumber cancelled.") (setq response nil))
       )
       (if response
         (progn
@@ -432,19 +354,8 @@
           (setq m-num  (caddr manual-settings))
           (setq m-label (strcat (FormatHoleNumber m-hole) m-loc (FormatNumber m-num)))
           ; Check collision at manual target
-          (if (TagExists m-hole m-loc m-num)
-            (progn
-              (princ (strcat "\nWARNING: " m-label " already exists!"))
-              (initget "Yes No")
-              (setq collision-response (getkword "\nRenumber existing tags to make room? [Yes/No] <No>: "))
-              (if (= collision-response "Yes")
-                (RenumberTags m-hole m-loc m-num)
-                (progn
-                  (princ "\nManual reassign cancelled.")
-                  (setq manual-settings nil)
-                )
-              )
-            )
+          (if (not (HN-CheckCollision m-hole m-loc m-num m-label))
+            (progn (princ "\nManual reassign cancelled.") (setq manual-settings nil))
           )
           (if manual-settings
             (progn
@@ -611,82 +522,141 @@
   tag-ent
 )
 
-;;; ------------------------------------------------------------------------
-;;; UTILITY FUNCTIONS
-;;; ------------------------------------------------------------------------
+;;; --- UTILITY FUNCTIONS ---
 
 (defun MakeRange (start end / result i)
-  "Create a list of integers from start to end (inclusive)"
-  (setq result '())
-  (setq i start)
-  (while (<= i end)
-    (setq result (append result (list i)))
-    (setq i (1+ i))
-  )
+  (setq result '() i start)
+  (while (<= i end) (setq result (append result (list i)) i (1+ i)))
   result
 )
 
-(defun FormatHoleNumber (num)
-  "Format hole number with leading zero (2 digits)"
-  (if (< num 10)
-    (strcat "0" (itoa num))
-    (itoa num)
+(defun FormatHoleNumber (n)
+  (if (< n 10) (strcat "0" (itoa n)) (itoa n))
+)
+
+(defun FormatNumber (n)
+  (cond ((< n 10)  (strcat "00" (itoa n)))
+        ((< n 100) (strcat "0"  (itoa n)))
+        (T         (itoa n)))
+)
+
+;;; --- SHARED HELPERS ---
+
+(defun HN-GetLFXVals (ent)
+  "Return the LandFX XDATA values list for an INSERT entity, or nil."
+  (cdr (assoc "LandFX" (cdr (assoc -3 (entget ent '("LandFX"))))))
+)
+
+(defun HN-GetTagInfo (tag-ent / xd xd-inner)
+  "Extract HEADNUM XDATA from a tag block.
+   Returns (hole-str loc-str num-str head-handle) or nil."
+  (if (and tag-ent
+           (setq xd (assoc -3 (entget tag-ent '("HEADNUM"))))
+           (setq xd-inner (cdr (assoc "HEADNUM" (cdr xd))))
+           (>= (length xd-inner) 4))
+    (list
+      (cdr (nth 0 xd-inner))  ; hole as string e.g. "1"
+      (cdr (nth 1 xd-inner))  ; location e.g. "FW"
+      (cdr (nth 2 xd-inner))  ; number e.g. "007"
+      (cdr (nth 3 xd-inner))  ; 1005 head handle
+    )
+    nil
   )
 )
 
-(defun FormatNumber (num)
-  "Format number with leading zeros (3 digits)"
-  (cond
-    ((< num 10) (strcat "00" (itoa num)))
-    ((< num 100) (strcat "0" (itoa num)))
-    (T (itoa num))
-  )
-)
-
-;;; ------------------------------------------------------------------------
-;;; DIALOG FUNCTIONS
-;;; ------------------------------------------------------------------------
-
-(defun BuildTagListItems (hole location / tags sorted nums i expected gaps items num label)
-  "Build a list of strings for the dialog list box, including gap markers"
-  (setq tags (GetAllHeadTags hole location))
-  (setq items '())
-  
-  (if (not tags)
-    (setq items (list "  (none)"))
+(defun HN-WriteCSV (path rows / fh)
+  "Write PNEZD CSV to path from rows list of (point N E Z desc).
+   Returns T on success, nil if file cannot be opened."
+  (setq fh (open path "w"))
+  (if fh
     (progn
-      ; Sort tags by number ascending
-      (setq sorted (vl-sort tags '(lambda (a b) (< (cadr a) (cadr b)))))
-      (setq nums (mapcar 'cadr sorted))
-      
-      ; Walk sequence finding gaps
-      (setq expected 1)
-      (foreach num nums
-        ; Add gap entries for any skipped numbers
-        (while (< expected num)
-          (setq items (append items 
-            (list (strcat (FormatHoleNumber hole) location (FormatNumber expected) "  -- GAP"))
-          ))
-          (setq expected (1+ expected))
+      (write-line "Point,Northing,Easting,Elevation,Description" fh)
+      (foreach row rows
+        (write-line
+          (strcat (car row) "," (cadr row) "," (caddr row) ","
+                  (nth 3 row) "," (nth 4 row))
+          fh))
+      (close fh)
+      T
+    )
+    nil
+  )
+)
+
+(defun HN-ScanValveRows (/ ss i ent ent-data lfx-vals first-1000 pos E-str N-str v12 desc-str rows)
+  "Scan all LandFX INSERT blocks and return sorted PNEZD rows for Valve entities."
+  (setq rows '())
+  (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq ent      (ssname ss i))
+        (setq ent-data (entget ent '("LandFX")))
+        (if (setq lfx-vals (HN-GetLFXVals ent))
+          (progn
+            (setq first-1000 (cdr (assoc 1000 lfx-vals)))
+            (if (= first-1000 "Valve")
+              (progn
+                (setq pos      (cdr (assoc 10 ent-data)))
+                (setq E-str    (rtos (car  pos) 2 4))
+                (setq N-str    (rtos (cadr pos) 2 4))
+                (setq v12      (nth 12 lfx-vals))
+                (setq desc-str (if (and v12 (= (car v12) 1000) (> (strlen (cdr v12)) 0))
+                                 (cdr v12) "VALVE"))
+                (setq rows (append rows (list (list "" N-str E-str "0" desc-str))))
+              )
+            )
+          )
         )
-        ; Add the actual tag entry
-        (setq items (append items
-          (list (strcat (FormatHoleNumber hole) location (FormatNumber num)))
-        ))
-        (setq expected (1+ num))
+        (setq i (1+ i))
       )
     )
   )
-  items
+  (vl-sort rows
+    '(lambda (a b)
+       (cond
+         ((< (nth 4 a) (nth 4 b)) T)
+         ((= (nth 4 a) (nth 4 b)) (< (atof (caddr a)) (atof (caddr b))))
+         (T nil)
+       )
+     )
+  )
+)
+
+;;; --- DIALOG FUNCTIONS ---
+
+(defun BuildTagListItems (hole location / tags sorted expected items num tag-ent)
+  "Build list of (label . tag-ent-or-nil) pairs for dialog list box, including gap markers."
+  (setq tags  (GetAllHeadTags hole location)
+        items '())
+  (if (not tags)
+    (list (cons "  (none)" nil))
+    (progn
+      (setq sorted   (vl-sort tags '(lambda (a b) (< (cadr a) (cadr b))))
+            expected 1)
+      (foreach tag sorted
+        (setq num     (cadr tag)
+              tag-ent (car  tag))
+        (while (< expected num)
+          (setq items (append items
+            (list (cons (strcat (FormatHoleNumber hole) location (FormatNumber expected) "  -- GAP") nil))
+          ))
+          (setq expected (1+ expected))
+        )
+        (setq items (append items
+          (list (cons (strcat (FormatHoleNumber hole) location (FormatNumber num)) tag-ent))
+        ))
+        (setq expected (1+ num))
+      )
+      items
+    )
+  )
 )
 
 
 (defun RefreshTagList (hole location / items)
-  "Repopulate the tag list box for the given hole/location"
   (setq items (BuildTagListItems hole location))
-  (start_list "tag_list")
-  (mapcar 'add_list items)
-  (end_list)
+  (start_list "tag_list") (mapcar '(lambda (x) (add_list (car x))) items) (end_list)
   items
 )
 
@@ -713,7 +683,8 @@
     )
   )
   (set_tile "override_num" (strcat (FormatHoleNumber hole) location (FormatNumber next-num)))
-  (mode_tile "fill_gaps_btn" (if (> gap-count 0) 0 1))
+  (mode_tile "fill_gaps_btn"  (if (> gap-count 0) 0 1))
+  (mode_tile "clear_num_btn" 8)
 )
 
 (defun HN-ToggleSprayers (/ layers doc layer-obj first-obj turn-on)
@@ -743,9 +714,7 @@
   )
 )
 
-;;; ------------------------------------------------------------------------
-;;; EXPORT DIALOG HELPERS
-;;; ------------------------------------------------------------------------
+;;; --- EXPORT DIALOG HELPERS ---
 
 (defun MakeSelectAllStr (n / i str)
   "Build '0 1 2 ... n-1' selection string for DCL multi-select list_box"
@@ -861,12 +830,10 @@
   combo-list
 )
 
-(defun GetHeadDescStr (head-ent / lfx-data lfx-vals v2 v3)
+(defun GetHeadDescStr (head-ent / lfx-vals v2 v3)
   "Return 'Model-Nozzle' desc string from a head block's LandFX XDATA"
-  (if (and head-ent
-           (setq lfx-data (assoc "LandFX" (cdr (assoc -3 (entget head-ent '("LandFX")))))))
+  (if (and head-ent (setq lfx-vals (HN-GetLFXVals head-ent)))
     (progn
-      (setq lfx-vals (cdr lfx-data))
       (setq v3 (nth 3 lfx-vals))   ; model short key  e.g. "RAIN-752"
       (setq v2 (nth 2 lfx-vals))   ; nozzle number    e.g. "20"
       (if (and v3 v2 (= (car v3) 1000) (= (car v2) 1000))
@@ -882,11 +849,10 @@
                            dwg-folder dwg-name written-count
                            hole loc tags sorted-tags
                            tag-pair tag-ent-name num head-handle head-ent head-pos
-                           E-str N-str desc-str row rows csv-path fh
-                           ss i ent ent-data lfx-entry lfx-vals
-                           first-1000 pos v12 valve-rows valve-count
-                           u-tagged-h u-ss u-i u-ent u-data u-lfx u-vals
-                           u-h0 u-handle u-tag-ss u-j u-tag-ent u-hh)
+                           E-str N-str desc-str row rows csv-path valve-rows
+                           ss i ent ent-data
+                           u-tagged-h u-ss u-i u-ent u-data u-vals
+                           u-handle u-tag-ss u-j u-tag-ent u-hh)
   "Export PNEZD CSVs for selected hole/location combos; include-valves=T also writes VALVES.csv"
   (setq dwg-folder    output-folder)
   (setq dwg-name      (vl-filename-base (getvar "DWGNAME")))
@@ -933,25 +899,18 @@
             (setq u-i 0)
             (repeat (sslength u-ss)
               (setq u-ent  (ssname u-ss u-i))
-              (setq u-data (entget u-ent '("LandFX")))
-              (if (setq u-lfx (assoc "LandFX" (cdr (assoc -3 u-data))))
+              (setq u-data (entget u-ent))
+              (if (and (setq u-vals (HN-GetLFXVals u-ent))
+                       (= (cdr (assoc 1000 u-vals)) "Head"))
                 (progn
-                  (setq u-vals (cdr u-lfx))
-                  (setq u-h0   (cdr (assoc 1000 u-vals)))
-                  (if (= u-h0 "Head")
+                  (setq u-handle (cdr (assoc 5 u-data)))
+                  (if (not (member u-handle u-tagged-h))
                     (progn
-                      (setq u-handle (cdr (assoc 5 u-data)))
-                      (if (not (member u-handle u-tagged-h))
-                        (progn
-                          (setq head-pos (cdr (assoc 10 u-data)))
-                          (setq E-str    (rtos (car  head-pos) 2 4))
-                          (setq N-str    (rtos (cadr head-pos) 2 4))
-                          (setq desc-str (GetHeadDescStr u-ent))
-                          (setq rows (append rows
-                            (list (list "" N-str E-str "0" desc-str))
-                          ))
-                        )
-                      )
+                      (setq head-pos (cdr (assoc 10 u-data)))
+                      (setq E-str    (rtos (car  head-pos) 2 4))
+                      (setq N-str    (rtos (cadr head-pos) 2 4))
+                      (setq desc-str (GetHeadDescStr u-ent))
+                      (setq rows (append rows (list (list "" N-str E-str "0" desc-str))))
                     )
                   )
                 )
@@ -963,16 +922,8 @@
         (if rows
           (progn
             (setq csv-path (strcat dwg-folder dwg-name "_UNNUMBERED.csv"))
-            (setq fh (open csv-path "w"))
-            (if fh
+            (if (HN-WriteCSV csv-path rows)
               (progn
-                (write-line "Point,Northing,Easting,Elevation,Description" fh)
-                (foreach row rows
-                  (write-line
-                    (strcat (car row) "," (cadr row) "," (caddr row) ","
-                            (nth 3 row) "," (nth 4 row))
-                    fh))
-                (close fh)
                 (princ (strcat "\nWrote: " csv-path " (" (itoa (length rows)) " unnumbered heads)"))
                 (setq written-count (1+ written-count))
               )
@@ -1010,16 +961,8 @@
               (progn
                 (setq csv-path (strcat dwg-folder dwg-name "_"
                                        (FormatHoleNumber hole) loc ".csv"))
-                (setq fh (open csv-path "w"))
-                (if fh
+                (if (HN-WriteCSV csv-path rows)
                   (progn
-                    (write-line "Point,Northing,Easting,Elevation,Description" fh)
-                    (foreach row rows
-                      (write-line
-                        (strcat (car row) "," (cadr row) "," (caddr row) ","
-                                (nth 3 row) "," (nth 4 row))
-                        fh))
-                    (close fh)
                     (princ (strcat "\nWrote: " csv-path " (" (itoa (length rows)) " heads)"))
                     (setq written-count (1+ written-count))
                   )
@@ -1037,62 +980,13 @@
   ; --- Valve CSV (optional) ---
   (if include-valves
     (progn
-      (setq valve-rows '() valve-count 0)
-      (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+      (setq valve-rows (HN-ScanValveRows))
+      (if valve-rows
         (progn
-          (setq i 0)
-          (repeat (sslength ss)
-            (setq ent      (ssname ss i))
-            (setq ent-data (entget ent '("LandFX")))
-            (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
-              (progn
-                (setq lfx-vals   (cdr lfx-entry))
-                (setq first-1000 (cdr (assoc 1000 lfx-vals)))
-                (if (= first-1000 "Valve")
-                  (progn
-                    (setq valve-count (1+ valve-count))
-                    (setq pos   (cdr (assoc 10 ent-data)))
-                    (setq E-str (rtos (car  pos) 2 4))
-                    (setq N-str (rtos (cadr pos) 2 4))
-                    (setq v12   (nth 12 lfx-vals))
-                    (setq desc-str
-                      (if (and v12 (= (car v12) 1000) (> (strlen (cdr v12)) 0))
-                        (cdr v12) "VALVE"))
-                    (setq valve-rows
-                      (append valve-rows (list (list "" N-str E-str "0" desc-str))))
-                  )
-                )
-              )
-            )
-            (setq i (1+ i))
-          )
-        )
-      )
-      (if (> valve-count 0)
-        (progn
-          (setq valve-rows
-            (vl-sort valve-rows
-              '(lambda (a b)
-                 (cond
-                   ((< (nth 4 a) (nth 4 b)) T)
-                   ((= (nth 4 a) (nth 4 b)) (< (atof (caddr a)) (atof (caddr b))))
-                   (T nil)
-                 )
-               )
-            )
-          )
           (setq csv-path (strcat dwg-folder dwg-name "_VALVES.csv"))
-          (setq fh (open csv-path "w"))
-          (if fh
+          (if (HN-WriteCSV csv-path valve-rows)
             (progn
-              (write-line "Point,Northing,Easting,Elevation,Description" fh)
-              (foreach row valve-rows
-                (write-line
-                  (strcat (car row) "," (cadr row) "," (caddr row) ","
-                          (nth 3 row) "," (nth 4 row))
-                  fh))
-              (close fh)
-              (princ (strcat "\nWrote: " csv-path " (" (itoa valve-count) " valves)"))
+              (princ (strcat "\nWrote: " csv-path " (" (itoa (length valve-rows)) " valves)"))
               (setq written-count (1+ written-count))
             )
             (princ (strcat "\nERROR: Cannot open " csv-path " for writing."))
@@ -1172,7 +1066,7 @@
   (setq combo-items (HN-BuildComboItems export-combos))
 
   ; Load and show sub-dialog
-  (setq dcl-path (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))
+  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
   (setq dcl_id (load_dialog dcl-path))
   (if (not (new_dialog "HeadExportDialog" dcl_id))
     (progn
@@ -1279,8 +1173,36 @@
   )
 )
 
+(defun HN-ZoomToEnt (ent / pt scrsize vh vw twist cx cy hs)
+  "Zoom viewport to keep current scale, shift entity to right of center (clear of dialog), highlight."
+  (setq pt (cdr (assoc 10 (entget ent))))
+  (if pt
+    (progn
+      (setq scrsize (getvar "SCREENSIZE")
+            vh      (getvar "VIEWSIZE")
+            vw      (* vh (/ (float (car scrsize)) (cadr scrsize)))
+            twist   (getvar "VIEWTWIST")
+            cx      (- (car  pt) (* (/ vw 4.0) (cos twist)))
+            cy      (- (cadr pt) (* (/ vw 4.0) (sin twist))))
+      (command "_.ZOOM" "_C" (list cx cy) vh)
+    )
+    (command "_.ZOOM" "_O" ent "")
+  )
+  (command "_.REDRAW")
+  (setq hs (ssadd ent (ssadd)))
+  (sssetfirst hs hs)
+)
+
+(defun HN-FindHead (tag-ent / info)
+  "Return the linked head entity from a tag block's HEADNUM xdata, or nil."
+  (if (and tag-ent (setq info (HN-GetTagInfo tag-ent)) (nth 3 info))
+    (handent (nth 3 info))
+    nil
+  )
+)
+
 (defun ShowSettingsDialog (current-hole current-location / dcl-path dcl_id hole-choice location-choice
-                            result list-items selected-idx selected-str chosen-num)
+                            result list-items selected-idx chosen-num tag-ent head-ent auto-num)
   "Display DCL dialog and return (hole location override-number)"
 
   (if (null *HN-DIR*)
@@ -1289,126 +1211,137 @@
       (exit)
     )
   )
-  (setq dcl-path (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))
-  (setq dcl_id (load_dialog dcl-path))
+  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
+  ; Initialize state before loop - these persist across zoom re-opens
+  (setq hole-choice     (if current-hole     (itoa (1- current-hole)) "0")
+        location-choice (if current-location (itoa (vl-position current-location *HN-Locations*)) "0")
+        selected-idx    -1
+        chosen-num      "")
 
-  (if (not (new_dialog "HeadNumDialog" dcl_id))
-    (progn
-      (alert "ERROR: Could not load dialog!")
-      (exit)
+  ; While loop: re-opens dialog after Find Tag/Head zoom (done_dialog 2/3), exits on OK/Cancel
+  (while (progn
+    (setq dcl_id (load_dialog dcl-path))
+    (if (not (new_dialog "HeadNumDialog" dcl_id))
+      (progn (alert "ERROR: Could not load dialog!") (exit))
     )
-  )
-  
-  ; Populate hole dropdown (1-27)
-  (start_list "hole_list")
-  (mapcar 'add_list (mapcar 'itoa (MakeRange 1 *HN-MaxHole*)))
-  (end_list)
-  
-  ; Populate location dropdown
-  (start_list "location_list")
-  (mapcar 'add_list *HN-Locations*)
-  (end_list)
-  
-  ; Set current values
-  (if current-hole
-    (set_tile "hole_list" (itoa (1- current-hole)))
-    (set_tile "hole_list" "0")
-  )
-  (if current-location
-    (set_tile "location_list"
-      (itoa (vl-position current-location *HN-Locations*))
+
+    ; Populate dropdowns
+    (start_list "hole_list")     (mapcar 'add_list (mapcar 'itoa (MakeRange 1 *HN-MaxHole*))) (end_list)
+    (start_list "location_list") (mapcar 'add_list *HN-Locations*)                            (end_list)
+
+    ; Restore state
+    (set_tile "hole_list"     hole-choice)
+    (set_tile "location_list" location-choice)
+    (setq list-items (RefreshTagList (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*)))
+    (HN-RefreshStatus          (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*))
+    (setq auto-num (get_tile "override_num"))
+    (if (> (strlen chosen-num) 0)
+      (progn
+        (set_tile "override_num" chosen-num)
+        (if (/= chosen-num auto-num)
+          (mode_tile "clear_num_btn" 0)
+        )
+      )
     )
-    (set_tile "location_list" "0")
-  )
-  
-  ; Initial tag list population
-  (setq hole-choice (get_tile "hole_list"))
-  (setq location-choice (get_tile "location_list"))
-  (setq list-items (RefreshTagList
-    (1+ (atoi hole-choice))
-    (nth (atoi location-choice) *HN-Locations*)
+    (if (>= selected-idx 0)
+      (progn
+        (set_tile "tag_list" (itoa selected-idx))
+        (mode_tile "find_tag_btn"  (if (cdr (nth selected-idx list-items)) 0 1))
+        (mode_tile "find_head_btn" (if (cdr (nth selected-idx list-items)) 0 1))
+      )
+    )
+
+    ; Action tiles
+    (action_tile "hole_list"
+      "(setq hole-choice $value  selected-idx -1)
+       (setq list-items (RefreshTagList (1+ (atoi hole-choice)) (nth (atoi (get_tile \"location_list\")) *HN-Locations*)))
+       (mode_tile \"find_tag_btn\" 1)  (mode_tile \"find_head_btn\" 1)
+       (HN-RefreshStatus (1+ (atoi hole-choice)) (nth (atoi (get_tile \"location_list\")) *HN-Locations*))
+       (setq auto-num (get_tile \"override_num\"))"
+    )
+    (action_tile "location_list"
+      "(setq location-choice $value  selected-idx -1)
+       (setq list-items (RefreshTagList (1+ (atoi (get_tile \"hole_list\"))) (nth (atoi location-choice) *HN-Locations*)))
+       (mode_tile \"find_tag_btn\" 1)  (mode_tile \"find_head_btn\" 1)
+       (HN-RefreshStatus (1+ (atoi (get_tile \"hole_list\"))) (nth (atoi location-choice) *HN-Locations*))
+       (setq auto-num (get_tile \"override_num\"))"
+    )
+    (action_tile "tag_list"
+      "(setq selected-idx (atoi $value))
+       (set_tile \"override_num\" (substr (car (nth selected-idx list-items)) 1 7))
+       (mode_tile \"clear_num_btn\" 0)
+       (if (cdr (nth selected-idx list-items))
+         (progn (mode_tile \"find_tag_btn\" 0)  (mode_tile \"find_head_btn\" 0))
+         (progn (mode_tile \"find_tag_btn\" 1)  (mode_tile \"find_head_btn\" 1))
+       )"
+    )
+    (action_tile "override_num"
+      "(if (/= (get_tile \"override_num\") auto-num)
+         (mode_tile \"clear_num_btn\" 0)
+         (mode_tile \"clear_num_btn\" 1)
+       )"
+    )
+    (action_tile "clear_num_btn"
+      "(HN-RefreshStatus (1+ (atoi (get_tile \"hole_list\"))) (nth (atoi (get_tile \"location_list\")) *HN-Locations*))
+       (setq auto-num (get_tile \"override_num\"))
+       (setq list-items (RefreshTagList (1+ (atoi (get_tile \"hole_list\"))) (nth (atoi (get_tile \"location_list\")) *HN-Locations*)))
+       (setq selected-idx -1)
+       (mode_tile \"find_tag_btn\" 1) (mode_tile \"find_head_btn\" 1)"
+    )
+    (action_tile "fill_gaps_btn"
+      "(setq hole-choice (get_tile \"hole_list\")
+             location-choice (get_tile \"location_list\")
+             chosen-num (get_tile \"override_num\"))
+       (done_dialog 4)"
+    )
+    (action_tile "export_btn" "(HN-RunExportDialog)")
+    ; Find buttons: capture state then dismiss with zoom codes 2/3
+    (action_tile "find_tag_btn"
+      "(setq hole-choice (get_tile \"hole_list\")
+             location-choice (get_tile \"location_list\")
+             chosen-num (get_tile \"override_num\"))
+       (done_dialog 2)"
+    )
+    (action_tile "find_head_btn"
+      "(setq hole-choice (get_tile \"hole_list\")
+             location-choice (get_tile \"location_list\")
+             chosen-num (get_tile \"override_num\"))
+       (done_dialog 3)"
+    )
+    (action_tile "accept"
+      "(setq hole-choice (get_tile \"hole_list\")
+             location-choice (get_tile \"location_list\")
+             chosen-num (get_tile \"override_num\"))
+       (done_dialog 1)"
+    )
+    (action_tile "cancel" "(done_dialog 0)")
+
+    (setq result (start_dialog))
+    (unload_dialog dcl_id)
+
+    ; Return T to continue loop, nil to exit (OK/Cancel)
+    (cond
+      ((= result 2)  ; Find Tag
+        (setq tag-ent (if (>= selected-idx 0) (cdr (nth selected-idx list-items)) nil))
+        (if tag-ent (HN-ZoomToEnt tag-ent))
+        T
+      )
+      ((= result 3)  ; Find Head
+        (setq tag-ent  (if (>= selected-idx 0) (cdr (nth selected-idx list-items)) nil)
+              head-ent (HN-FindHead tag-ent))
+        (if head-ent (HN-ZoomToEnt head-ent))
+        T
+      )
+      ((= result 4)  ; Fill Gaps - run outside dialog so drawing updates are visible
+        (FillGaps (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*))
+        (command "_.REDRAW")
+        (setq selected-idx -1)
+        T
+      )
+      (T nil)  ; OK (1) or Cancel (0) - exit loop
+    )
   ))
-  (HN-RefreshStatus
-    (1+ (atoi hole-choice))
-    (nth (atoi location-choice) *HN-Locations*)
-  )
 
-  ; When hole changes - refresh list and status (HN-RefreshStatus repopulates override_num)
-  (action_tile "hole_list"
-    "(setq hole-choice $value)
-     (setq list-items (RefreshTagList
-       (1+ (atoi hole-choice))
-       (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-     ))
-     (HN-RefreshStatus
-       (1+ (atoi hole-choice))
-       (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-     )"
-  )
-
-  ; When location changes - refresh list and status
-  (action_tile "location_list"
-    "(setq location-choice $value)
-     (setq list-items (RefreshTagList
-       (1+ (atoi (get_tile \"hole_list\")))
-       (nth (atoi location-choice) *HN-Locations*)
-     ))
-     (HN-RefreshStatus
-       (1+ (atoi (get_tile \"hole_list\")))
-       (nth (atoi location-choice) *HN-Locations*)
-     )"
-  )
-
-  ; When list item clicked - set override_num to full label (e.g. "01FW007")
-  (action_tile "tag_list"
-    "(setq selected-idx (atoi $value))
-     (setq selected-str (nth selected-idx list-items))
-     (if selected-str
-       (set_tile \"override_num\" (substr selected-str 1 7))
-     )"
-  )
-
-  ; Auto button - restore auto-next number via HN-RefreshStatus
-  (action_tile "clear_num_btn"
-    "(HN-RefreshStatus
-       (1+ (atoi (get_tile \"hole_list\")))
-       (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-     )"
-  )
-  
-  ; Fill Gaps button
-  (action_tile "fill_gaps_btn"
-    "(progn
-       (FillGaps
-         (1+ (atoi (get_tile \"hole_list\")))
-         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-       )
-       (setq list-items (RefreshTagList
-         (1+ (atoi (get_tile \"hole_list\")))
-         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-       ))
-       (HN-RefreshStatus
-         (1+ (atoi (get_tile \"hole_list\")))
-         (nth (atoi (get_tile \"location_list\")) *HN-Locations*)
-       )
-     )"
-  )
-
-  ; Export button — opens sub-dialog to select areas and run export
-  (action_tile "export_btn" "(HN-RunExportDialog)")
-
-  ; OK button - capture all values before dialog closes
-  (action_tile "accept"
-    "(setq hole-choice (get_tile \"hole_list\"))
-     (setq location-choice (get_tile \"location_list\"))
-     (setq chosen-num (get_tile \"override_num\"))
-     (done_dialog 1)"
-  )
-  (action_tile "cancel" "(done_dialog 0)")
-  
-  (setq result (start_dialog))
-  (unload_dialog dcl_id)
-  
   (if (= result 1)
     (list
       (1+ (atoi hole-choice))
@@ -1423,9 +1356,7 @@
   )
 )
 
-;;; ------------------------------------------------------------------------
-;;; MAIN COMMAND
-;;; ------------------------------------------------------------------------
+;;; --- MAIN COMMAND ---
 
 (defun c:NUMBERHEADS (/ settings current-hole current-location current-number existing-tags
                         head-ent head-handle head-pt tag-ent place-pt existing-tag
@@ -1478,35 +1409,19 @@
         (HN-ToggleSprayers)
       )
 
-      ; User typed "Manual" keyword - open dialog to set next number
-      ((or (= user-input "Manual") (= user-input "M"))
+      ; User typed "Manual", "Change" or shortcuts - open dialog
+      ((or (= user-input "Manual") (= user-input "M")
+           (= user-input "Change") (= user-input "C"))
         (if (setq settings (ShowSettingsDialog current-hole current-location))
           (progn
-            (setq current-hole     (car settings))
-            (setq current-location (cadr settings))
-            (setq *HN-LastHole*     current-hole)
-            (setq *HN-LastLocation* current-location)
-            (setq current-number (caddr settings))
+            (setq current-hole      (car settings)
+                  current-location  (cadr settings)
+                  *HN-LastHole*     current-hole
+                  *HN-LastLocation* current-location
+                  current-number    (caddr settings))
             (princ (strcat "\nNext: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
           )
           (princ "\nCancelled.")
-        )
-      )
-      
-      ; User typed "Change" or "C" keyword
-      ((or (= user-input "Change") (= user-input "C"))
-        (princ "\nChanging settings...")
-        (if (setq settings (ShowSettingsDialog current-hole current-location))
-          (progn
-            (setq current-hole     (car settings))
-            (setq current-location (cadr settings))
-            (setq *HN-LastHole*     current-hole)
-            (setq *HN-LastLocation* current-location)
-            (setq current-number (caddr settings))
-            (princ (strcat "\nSwitched to Hole: " (itoa current-hole) " | Location: " current-location))
-            (princ (strcat "\nNext number: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
-          )
-          (princ "\nSettings change cancelled, continuing with current settings.")
         )
       )
       
@@ -1615,121 +1530,66 @@
 (princ "\n==========================================\n")
 (princ)
 
-;;; ------------------------------------------------------------------------
-;;; UTILITY COMMANDS - FIND TAG/HEAD
-;;; ------------------------------------------------------------------------
+;;; --- UTILITY COMMANDS - FIND TAG/HEAD ---
 
-(defun c:FINDTAG (/ head-sel head-ent tag-ent tag-data hole loc num ss i xdata xdata-app xdata-vals xdata-section handle-pair head-handle parent-list test-tag att-ent att-val)
-  "Click a head block to find and highlight its linked tag (LAFX-TAG-SQUARE-999 or LAFX-TAG)"
-  
+(defun c:FINDTAG (/ head-sel head-ent head-handle tag-ent i ss test-tag
+                    xdata xdata-section att-ent parent-list)
+  "Click a head block to find and highlight its linked tag"
   (setq head-sel (nentsel "\nSelect head block: "))
-  
   (if head-sel
     (progn
       (setq head-ent (car head-sel))
-      
-      ; nentsel: (entity pick-point matrix parent-list) for nested
-      ; parent-list is 4th element when nested
       (if (= (length head-sel) 4)
-        (progn
-          (setq parent-list (cadddr head-sel))
-          (if (and parent-list (listp parent-list))
-            (setq head-ent (last parent-list))
-          )
+        (if (and (cadddr head-sel) (listp (cadddr head-sel)))
+          (setq head-ent (last (cadddr head-sel)))
         )
       )
-      
       (setq head-handle (cdr (assoc 5 (entget head-ent))))
-      (princ (strcat "\nHead handle: " head-handle))
-      (princ (strcat "\nHead block: " (cdr (assoc 2 (entget head-ent)))))
-      
-      ; First try to find LAFX-TAG-SQUARE-999 (our system)
+      (princ (strcat "\nHead: " (cdr (assoc 2 (entget head-ent))) "  handle: " head-handle))
       (if (setq tag-ent (HeadHasTag head-ent))
         (progn
           (princ "\n>>> Found LAFX-TAG-SQUARE-999 (TCLLC System) <<<")
-          
-          ; Get tag data to show the number
-          (setq tag-data (entget tag-ent '("HEADNUM")))
-          
-          ; Extract hole/location/number from XDATA
-          (if (setq xdata (assoc -3 tag-data))
-            (progn
-              (setq xdata-app (assoc "HEADNUM" (cdr xdata)))
-              (if xdata-app
-                (progn
-                  (setq xdata-vals (cdr xdata-app))
-                  (setq hole (cdr (nth 0 xdata-vals)))
-                  (setq loc (cdr (nth 1 xdata-vals)))
-                  (setq num (cdr (nth 2 xdata-vals)))
-                  (princ (strcat "\nTag number: " hole loc num))
-                )
-              )
+          (if (setq xdata (assoc -3 (entget tag-ent '("HEADNUM"))))
+            (if (setq xdata (cdr (assoc "HEADNUM" (cdr xdata))))
+              (princ (strcat "\nTag number: " (cdr (nth 0 xdata)) (cdr (nth 1 xdata)) (cdr (nth 2 xdata))))
             )
           )
-          
-          ; Highlight the tag
           (redraw tag-ent 3)
           (princ "\nTag highlighted! Press Enter to continue...")
           (getstring)
           (redraw tag-ent 4)
         )
         (progn
-          ; Not found in our system, try LAFX system
           (princ "\n>>> Checking for other tag systems... <<<")
-          
-          ; Search all LAFX-TAG blocks
           (if (setq ss (ssget "_X" '((0 . "INSERT")(2 . "LAFX-TAG*"))))
             (progn
-              (princ (strcat "\nFound " (itoa (sslength ss)) " LAFX-TAG blocks in drawing"))
-              (setq i 0)
-              (setq tag-ent nil)
-              
+              (princ (strcat "\nFound " (itoa (sslength ss)) " LAFX-TAG blocks"))
+              (setq i 0 tag-ent nil)
               (while (and (< i (sslength ss)) (not tag-ent))
-                (setq test-tag (ssname ss i))
-                
-                ; Get XDATA - try multiple app names
-                (setq xdata (entget test-tag '("*")))
-                (setq xdata-section (assoc -3 xdata))
-                
+                (setq test-tag     (ssname ss i)
+                      xdata-section (assoc -3 (entget test-tag '("*"))))
                 (if xdata-section
-                  (progn
-                    ; Look through all XDATA apps for a 1005 handle reference
-                    (foreach app-data (cdr xdata-section)
-                      (if (listp app-data)
-                        (progn
-                          (foreach data-pair (cdr app-data)
-                            (if (and (listp data-pair) (= (car data-pair) 1005))
-                              (if (equal (cdr data-pair) head-handle)
-                                (progn
-                                  (setq tag-ent test-tag)
-                                  (princ "\n>>> Found LAFX-TAG (Land F/X System) <<<")
-                                  (princ (strcat "\nXDATA app: " (car app-data)))
-                                )
-                              )
-                            )
+                  (foreach app-data (cdr xdata-section)
+                    (if (listp app-data)
+                      (foreach pair (cdr app-data)
+                        (if (and (listp pair) (= (car pair) 1005) (equal (cdr pair) head-handle))
+                          (progn (setq tag-ent test-tag)
+                                 (princ (strcat "\n>>> Found LAFX-TAG  app: " (car app-data) " <<<"))
                           )
                         )
                       )
                     )
                   )
                 )
-                
                 (setq i (1+ i))
               )
-              
               (if tag-ent
                 (progn
-                  ; Try to get valve number from attributes
                   (setq att-ent (entnext tag-ent))
                   (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
-                    (setq att-val (cdr (assoc 1 (entget att-ent))))
-                    (if att-val
-                      (princ (strcat "\nValve number: " att-val))
-                    )
+                    (princ (strcat "\nValve number: " (cdr (assoc 1 (entget att-ent)))))
                     (setq att-ent (entnext att-ent))
                   )
-                  
-                  ; Highlight the tag
                   (redraw tag-ent 3)
                   (princ "\nLand F/X tag highlighted! Press Enter to continue...")
                   (getstring)
@@ -1748,127 +1608,75 @@
   (princ)
 )
 
-(defun c:FINDHEAD (/ tag-sel tag-ent tag-name xdata xdata-app xdata-vals xdata-section handle-pair head-handle head-ent head-pt att-ent att-val)
-  "Click a tag block to find and highlight its linked head (LAFX-TAG-SQUARE-999 or LAFX-TAG)"
-  
+(defun c:FINDHEAD (/ tag-sel tag-ent tag-name xdata xdata-vals head-handle head-ent head-pos att-ent)
+  "Click a tag block to find and highlight its linked head"
   (setq tag-sel (entsel "\nSelect tag block: "))
-  
   (if tag-sel
     (progn
-      (setq tag-ent (car tag-sel))
-      (setq tag-name (cdr (assoc 2 (entget tag-ent))))
-      
-      (princ (strcat "\nSelected block: " tag-name))
-      
-      ; Check if it's a LAFX-TAG-SQUARE-999 block (TCLLC system)
-      (if (= "LAFX-TAG-SQUARE-999" tag-name)
-        (progn
+      (setq tag-ent  (car tag-sel)
+            tag-name (cdr (assoc 2 (entget tag-ent))))
+      (princ (strcat "\nSelected: " tag-name))
+      (cond
+        ; TCLLC tag
+        ((= "LAFX-TAG-SQUARE-999" tag-name)
           (princ "\n>>> LAFX-TAG-SQUARE-999 (TCLLC System) <<<")
-          
-          ; Get XDATA
           (if (setq xdata (assoc -3 (entget tag-ent '("HEADNUM"))))
-            (progn
-              (setq xdata-app (assoc "HEADNUM" (cdr xdata)))
-              (if xdata-app
-                (progn
-                  ; Get the handle reference (1005)
-                  (setq xdata-vals (cdr xdata-app))
-                  (if (setq handle-pair (assoc 1005 xdata-vals))
-                    (progn
-                      (setq head-handle (cdr handle-pair))
-                      (setq head-ent (handent head-handle))
-                      
-                      (if head-ent
-                        (progn
-                          (princ (strcat "\nFound head: " (cdr (assoc 2 (entget head-ent)))))
-                          (princ (strcat "\nHandle: " head-handle))
-                          
-                          ; Highlight the head
-                          (redraw head-ent 3)
-                          (princ "\nHead highlighted! Press Enter to continue...")
-                          (getstring)
-                          (redraw head-ent 4)
-                        )
-                        (princ "\nLinked head not found (broken reference).")
-                      )
-                    )
-                    (princ "\nNo head link found in tag XDATA.")
+            (if (setq xdata-vals (cdr (assoc "HEADNUM" (cdr xdata))))
+              (if (setq head-handle (cdr (assoc 1005 xdata-vals)))
+                (if (setq head-ent (handent head-handle))
+                  (progn
+                    (princ (strcat "\nFound: " (cdr (assoc 2 (entget head-ent))) "  handle: " head-handle))
+                    (redraw head-ent 3)
+                    (princ "\nHead highlighted! Press Enter to continue...")
+                    (getstring)
+                    (redraw head-ent 4)
                   )
+                  (princ "\nLinked head not found (broken reference).")
                 )
-                (princ "\nNo HEADNUM data found in tag.")
+                (princ "\nNo head link found in tag XDATA.")
               )
+              (princ "\nNo HEADNUM data found in tag.")
             )
             (princ "\nNo XDATA found on this tag.")
           )
         )
-        ; Check if it's a LAFX-TAG block
-        (if (wcmatch tag-name "LAFX-TAG*")
-          (progn
-            (princ "\n>>> LAFX-TAG (Land F/X System) <<<")
-            
-            ; Get valve number from attributes
-            (setq att-ent (entnext tag-ent))
-            (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
-              (setq att-val (cdr (assoc 1 (entget att-ent))))
-              (if att-val
-                (princ (strcat "\nValve number: " att-val))
-              )
-              (setq att-ent (entnext att-ent))
-            )
-            
-            ; Get XDATA - try all apps
-            (setq xdata (entget tag-ent '("*")))
-            (setq xdata-section (assoc -3 xdata))
-            
-            (if xdata-section
-              (progn
-                ; Look through all XDATA apps for a 1005 handle reference
-                (setq head-handle nil)
-                (foreach app-data (cdr xdata-section)
-                  (if (listp app-data)
-                    (progn
-                      (foreach data-pair (cdr app-data)
-                        (if (and (listp data-pair) (= (car data-pair) 1005))
-                          (progn
-                            (setq head-handle (cdr data-pair))
-                            (princ (strcat "\nXDATA app: " (car app-data)))
-                          )
-                        )
-                      )
-                    )
+        ; LandFX tag
+        ((wcmatch tag-name "LAFX-TAG*")
+          (princ "\n>>> LAFX-TAG (Land F/X System) <<<")
+          (setq att-ent (entnext tag-ent))
+          (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (entget att-ent)))))
+            (princ (strcat "\nValve number: " (cdr (assoc 1 (entget att-ent)))))
+            (setq att-ent (entnext att-ent))
+          )
+          (setq head-handle nil)
+          (if (setq xdata (assoc -3 (entget tag-ent '("*"))))
+            (foreach app-data (cdr xdata)
+              (if (listp app-data)
+                (foreach pair (cdr app-data)
+                  (if (and (listp pair) (= (car pair) 1005))
+                    (setq head-handle (cdr pair))
                   )
                 )
-                
-                (if head-handle
-                  (progn
-                    (setq head-ent (handent head-handle))
-                    
-                    (if head-ent
-                      (progn
-                        (princ (strcat "\nFound head: " (cdr (assoc 2 (entget head-ent)))))
-                        (princ (strcat "\nHandle: " head-handle))
-                        
-                        ; Get head position
-                        (setq head-pt (cdr (assoc 10 (entget head-ent))))
-                        (princ (strcat "\nPosition: " (rtos (car head-pt) 2 4) "," (rtos (cadr head-pt) 2 4)))
-                        
-                        ; Highlight the head
-                        (redraw head-ent 3)
-                        (princ "\nHead highlighted! Press Enter to continue...")
-                        (getstring)
-                        (redraw head-ent 4)
-                      )
-                      (princ "\nLinked head not found (broken reference).")
-                    )
-                  )
-                  (princ "\nNo head link (1005) found in XDATA.")
-                )
               )
-              (princ "\nNo XDATA found on this LAFX tag.")
             )
           )
-          (princ "\nSelected block is not a recognized tag block.")
+          (if head-handle
+            (if (setq head-ent (handent head-handle))
+              (progn
+                (setq head-pos (cdr (assoc 10 (entget head-ent))))
+                (princ (strcat "\nFound: " (cdr (assoc 2 (entget head-ent))) "  handle: " head-handle))
+                (princ (strcat "\nPos: " (rtos (car head-pos) 2 4) "," (rtos (cadr head-pos) 2 4)))
+                (redraw head-ent 3)
+                (princ "\nHead highlighted! Press Enter to continue...")
+                (getstring)
+                (redraw head-ent 4)
+              )
+              (princ "\nLinked head not found (broken reference).")
+            )
+            (princ "\nNo head link (1005) found in XDATA.")
+          )
         )
+        (T (princ "\nNot a recognized tag block."))
       )
     )
     (princ "\nNo selection.")
@@ -1895,15 +1703,14 @@
 ;;;   Description = Model-Nozzle (e.g. RAIN-752-20)
 ;;; ------------------------------------------------------------------------
 
-(defun c:EXPORTHEADS (/ tag-ss tag-ent tag-xd tag-vals t-h1005 tag-map j
+(defun c:EXPORTHEADS (/ tag-ss tag-ent tag-info tag-map j
                         ss i ent ent-data pos E-str N-str
-                        lfx-entry lfx-vals first-1000 model-str nozzle-str desc-str
-                        head-handle tag-info pt-num bucket-key row
+                        lfx-vals desc-str
+                        head-handle pt-num bucket-key row
                         buckets loc-key rows sorted-rows
-                        dwg-folder dwg-name csv-path fh
+                        dwg-folder dwg-name csv-path
                         head-count unnumbered-count written-files
-                        v2 v3 v12
-                        valve-rows valve-count)
+                        valve-rows)
   "Export all LandFX head blocks to PNEZD CSV files, one file per location code."
 
   (princ "\n=== EXPORT HEADS TO CSV (PNEZD) ===")
@@ -1918,25 +1725,14 @@
       (setq j 0)
       (repeat (sslength tag-ss)
         (setq tag-ent (ssname tag-ss j))
-        (if (setq tag-xd (assoc -3 (entget tag-ent '("HEADNUM"))))
-          (progn
-            (setq tag-vals (cdr (assoc "HEADNUM" (cdr tag-xd))))
-            ; Need at least 4 items: hole, loc, num, 1005 handle
-            (if (and tag-vals (>= (length tag-vals) 4))
-              (progn
-                (setq t-h1005 (assoc 1005 tag-vals))
-                (if t-h1005
-                  (setq tag-map
-                    (cons
-                      (list (cdr t-h1005)           ; [0] head handle (key for assoc)
-                            (cdr (nth 0 tag-vals))  ; [1] hole as string e.g. "1"
-                            (cdr (nth 1 tag-vals))  ; [2] location e.g. "FW"
-                            (cdr (nth 2 tag-vals))) ; [3] number e.g. "007"
-                      tag-map
-                    )
-                  )
-                )
-              )
+        (if (setq tag-info (HN-GetTagInfo tag-ent))
+          (setq tag-map
+            (cons
+              (list (nth 3 tag-info)   ; [0] head handle (key for assoc)
+                    (nth 0 tag-info)   ; [1] hole as string e.g. "1"
+                    (nth 1 tag-info)   ; [2] location e.g. "FW"
+                    (nth 2 tag-info))  ; [3] number e.g. "007"
+              tag-map
             )
           )
         )
@@ -1963,64 +1759,49 @@
     (setq ent      (ssname ss i))
     (setq ent-data (entget ent '("LandFX")))
 
-    ; Get LandFX entry and vals list
-    (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
+    (if (and (setq lfx-vals (HN-GetLFXVals ent))
+             (= (cdr (assoc 1000 lfx-vals)) "Head"))
       (progn
-        (setq lfx-vals   (cdr lfx-entry))
-        (setq first-1000 (cdr (assoc 1000 lfx-vals)))
+        (setq head-count (1+ head-count))
 
-        (if (= first-1000 "Head")
+        ; Insertion point → E (X) and N (Y)
+        (setq pos   (cdr (assoc 10 ent-data)))
+        (setq E-str (rtos (car  pos) 2 4))
+        (setq N-str (rtos (cadr pos) 2 4))
+
+        (setq desc-str (GetHeadDescStr ent))
+
+        ; Look up this head's handle in the tag map
+        (setq head-handle (cdr (assoc 5 ent-data)))
+        (setq tag-info    (assoc head-handle tag-map))
+
+        (if tag-info
           (progn
-            (setq head-count (1+ head-count))
+            ; Numbered: build formatted point string and bucket by location
+            (setq pt-num     (strcat (FormatHoleNumber (atoi (cadr tag-info)))
+                                     (caddr tag-info)
+                                     (cadddr tag-info)))
+            (setq bucket-key (caddr tag-info))  ; location code e.g. "FW"
+          )
+          (progn
+            ; Unnumbered
+            (setq pt-num      "")
+            (setq bucket-key  "UNNUMBERED")
+            (setq unnumbered-count (1+ unnumbered-count))
+          )
+        )
 
-            ; Insertion point → E (X) and N (Y)
-            (setq pos   (cdr (assoc 10 ent-data)))
-            (setq E-str (rtos (car  pos) 2 4))
-            (setq N-str (rtos (cadr pos) 2 4))
-
-            ; Model [3] and Nozzle [2] from LandFX XDATA
-            (setq v2 (nth 2 lfx-vals))
-            (setq v3 (nth 3 lfx-vals))
-            (setq nozzle-str (if (and v2 (= (car v2) 1000)) (cdr v2) ""))
-            (setq model-str  (if (and v3 (= (car v3) 1000)) (cdr v3) ""))
-            (if (and (> (strlen model-str) 0) (> (strlen nozzle-str) 0))
-              (setq desc-str (strcat model-str "-" nozzle-str))
-              (setq desc-str (cdr (assoc 2 ent-data)))  ; fallback: block name
-            )
-
-            ; Look up this head's handle in the tag map
-            (setq head-handle (cdr (assoc 5 ent-data)))
-            (setq tag-info    (assoc head-handle tag-map))
-
-            (if tag-info
-              (progn
-                ; Numbered: build formatted point string and bucket by location
-                (setq pt-num     (strcat (FormatHoleNumber (atoi (cadr tag-info)))
-                                         (caddr tag-info)
-                                         (cadddr tag-info)))
-                (setq bucket-key (caddr tag-info))  ; location code e.g. "FW"
-              )
-              (progn
-                ; Unnumbered
-                (setq pt-num      "")
-                (setq bucket-key  "UNNUMBERED")
-                (setq unnumbered-count (1+ unnumbered-count))
-              )
-            )
-
-            ; Build row (Point N E Z Desc) and add to location bucket
-            (setq row (list pt-num N-str E-str "0" desc-str))
-            (if (assoc bucket-key buckets)
-              (setq buckets
-                (subst
-                  (cons bucket-key (append (cdr (assoc bucket-key buckets)) (list row)))
-                  (assoc bucket-key buckets)
-                  buckets
-                )
-              )
-              (setq buckets (append buckets (list (cons bucket-key (list row)))))
+        ; Build row (Point N E Z Desc) and add to location bucket
+        (setq row (list pt-num N-str E-str "0" desc-str))
+        (if (assoc bucket-key buckets)
+          (setq buckets
+            (subst
+              (cons bucket-key (append (cdr (assoc bucket-key buckets)) (list row)))
+              (assoc bucket-key buckets)
+              buckets
             )
           )
+          (setq buckets (append buckets (list (cons bucket-key (list row)))))
         )
       )
     )
@@ -2061,22 +1842,8 @@
     )
 
     (setq csv-path (strcat dwg-folder dwg-name "_" loc-key ".csv"))
-    (setq fh (open csv-path "w"))
-
-    (if fh
+    (if (HN-WriteCSV csv-path sorted-rows)
       (progn
-        (write-line "Point,Northing,Easting,Elevation,Description" fh)
-        (foreach row sorted-rows
-          (write-line
-            (strcat (car   row) ","
-                    (cadr  row) ","
-                    (caddr row) ","
-                    (nth 3 row) ","
-                    (nth 4 row))
-            fh
-          )
-        )
-        (close fh)
         (princ (strcat "\nWrote: " csv-path " (" (itoa (length sorted-rows)) " rows)"))
         (setq written-files (1+ written-files))
       )
@@ -2087,81 +1854,13 @@
   ; -------------------------------------------------------
   ; Step 4: Scan valve blocks — write [DWG]_VALVES.csv
   ; -------------------------------------------------------
-  (setq valve-rows  '())
-  (setq valve-count 0)
-
-  (if (setq ss (ssget "_X" (list '(0 . "INSERT") '(-3 ("LandFX")))))
+  (setq valve-rows (HN-ScanValveRows))
+  (if valve-rows
     (progn
-      (setq i 0)
-      (repeat (sslength ss)
-        (setq ent      (ssname ss i))
-        (setq ent-data (entget ent '("LandFX")))
-        (if (setq lfx-entry (assoc "LandFX" (cdr (assoc -3 ent-data))))
-          (progn
-            (setq lfx-vals   (cdr lfx-entry))
-            (setq first-1000 (cdr (assoc 1000 lfx-vals)))
-            ; DEBUG: uncomment next line to see every LandFX type encountered
-            ;(princ (strcat "\n  [VALVE-SCAN] block=" (cdr (assoc 2 ent-data)) "  type=" (if first-1000 first-1000 "NIL")))
-            (if (= first-1000 "Valve")
-              (progn
-                (setq valve-count (1+ valve-count))
-                (setq pos   (cdr (assoc 10 ent-data)))
-                (setq E-str (rtos (car  pos) 2 4))
-                (setq N-str (rtos (cadr pos) 2 4))
-                ; Type code is at index [12] (e.g. "SOV-001", "SOV-005", "RCV-002")
-                (setq v12 (nth 12 lfx-vals))
-                (setq desc-str
-                  (if (and v12 (= (car v12) 1000) (> (strlen (cdr v12)) 0))
-                    (cdr v12)
-                    "VALVE"
-                  )
-                )
-                (setq valve-rows
-                  (append valve-rows (list (list "" N-str E-str "0" desc-str)))
-                )
-              )
-            )
-          )
-        )
-        (setq i (1+ i))
-      )
-      (princ (strcat "\nValve scan: checked " (itoa (sslength ss))
-                     " LandFX entities, found " (itoa valve-count) " valves."))
-    )
-    (princ "\nValve scan: no LandFX entities found in drawing at all.")
-  )
-
-  (if (> valve-count 0)
-    (progn
-      ; Sort by type code (desc), then by Easting within each type
-      (setq valve-rows
-        (vl-sort valve-rows
-          '(lambda (a b)
-             (cond
-               ((< (nth 4 a) (nth 4 b)) T)
-               ((= (nth 4 a) (nth 4 b)) (< (atof (caddr a)) (atof (caddr b))))
-               (T nil)
-             )
-          )
-        )
-      )
       (setq csv-path (strcat dwg-folder dwg-name "_VALVES.csv"))
-      (setq fh (open csv-path "w"))
-      (if fh
+      (if (HN-WriteCSV csv-path valve-rows)
         (progn
-          (write-line "Point,Northing,Easting,Elevation,Description" fh)
-          (foreach row valve-rows
-            (write-line
-              (strcat (car   row) ","
-                      (cadr  row) ","
-                      (caddr row) ","
-                      (nth 3 row) ","
-                      (nth 4 row))
-              fh
-            )
-          )
-          (close fh)
-          (princ (strcat "\nWrote: " csv-path " (" (itoa valve-count) " valves)"))
+          (princ (strcat "\nWrote: " csv-path " (" (itoa (length valve-rows)) " valves)"))
           (setq written-files (1+ written-files))
         )
         (princ (strcat "\nERROR: Cannot write to " csv-path))

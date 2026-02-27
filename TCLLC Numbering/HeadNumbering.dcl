@@ -40,6 +40,25 @@ HeadNumDialog : dialog {
       allow_accept = false;
       multiple_select = false;
     }
+
+    : row {
+      fixed_width = true;
+      alignment = centered;
+      : button {
+        key = "find_tag_btn";
+        label = "Find Tag";
+        fixed_width = true;
+        width = 13;
+        is_enabled = false;
+      }
+      : button {
+        key = "find_head_btn";
+        label = "Find Head";
+        fixed_width = true;
+        width = 13;
+        is_enabled = false;
+      }
+    }
   }
 
   : row {
@@ -50,7 +69,7 @@ HeadNumDialog : dialog {
       fixed_width = true;
       : row {
         : edit_box { key = "override_num"; width = 7; fixed_width = true; }
-        : button { key = "clear_num_btn"; label = "Auto"; fixed_width = true; width = 6; }
+        : button { key = "clear_num_btn"; label = "Clear"; fixed_width = true; width = 6; is_enabled = false; }
       }
     }
   }
