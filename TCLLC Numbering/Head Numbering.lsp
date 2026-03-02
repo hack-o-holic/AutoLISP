@@ -1,10 +1,10 @@
 ;;; ========================================================================
-;;; HEAD NUMBERING ROUTINE
+;;; HEAD NUMBERING ROUTINE - CB VERSION
 ;;; ========================================================================
 ;;; Interactive head numbering with counter persistence and smart renumbering
-;;; 
+;;;
 ;;; USAGE: NUMBERHEADS
-;;; 
+;;;
 ;;; Features:
 ;;; - DCL dialog for hole/location selection
 ;;; - Persistent counters stored in drawing dictionary
@@ -12,6 +12,7 @@
 ;;; - Manual number override with collision detection
 ;;; - Smart renumbering when inserting gaps
 ;;; - Mid-stream settings change
+;;; - Padding toggle: independently control display vs CSV leading zeros
 ;;; ========================================================================
 
 ;;; --- CONFIGURATION ---
@@ -20,11 +21,72 @@
 (setq *HN-MaxHole*       27)
 (setq *HN-DIR*
   (cond
-    ((findfile "Head Numbering.lsp") (vl-filename-directory (findfile "Head Numbering.lsp")))
-    ((findfile "HeadNumbering.dcl")  (vl-filename-directory (findfile "HeadNumbering.dcl")))
+    ((findfile "Head Numbering CB.lsp") (vl-filename-directory (findfile "Head Numbering CB.lsp")))
+    ((findfile "HeadNumbering CB.dcl")  (vl-filename-directory (findfile "HeadNumbering CB.dcl")))
     (T nil)))
 (if (not *HN-LastHole*)     (setq *HN-LastHole*     nil))
 (if (not *HN-LastLocation*) (setq *HN-LastLocation* nil))
+(if (not *HN-Pad-Disp*)     (setq *HN-Pad-Disp*   T))  ; T = use leading zeros on drawing
+(if (not *HN-Pad-Export*)   (setq *HN-Pad-Export*  T))  ; T = use leading zeros in CSV
+
+;;; --- SMART SYNC & AUTO-DETECT ---
+
+(defun HN-AutoDetectPadding (/ ss ent info att att-data raw-display actual-val)
+  "Sets *HN-Pad-Disp* by comparing the stored XDATA numbers to the displayed attribute text.
+   Compares the attribute against what the number would look like with NO padding — if they
+   match the tag is unpadded, otherwise padded.  Works correctly for any number size."
+  (if (setq ss (ssget "_X" '((0 . "INSERT") (2 . "LAFX-TAG-SQUARE-999"))))
+    (progn
+      (setq ent (ssname ss 0))
+      (if (setq info (HN-GetTagInfo ent))
+        (progn
+          ; Build what this tag's attribute would look like with zero padding removed
+          (setq raw-display
+            (strcat (itoa (atoi (nth 0 info)))    ; raw hole  e.g. "1"  (strips "01")
+                    (nth 1 info)                   ; location  e.g. "FW"
+                    (itoa (atoi (nth 2 info)))))   ; raw number e.g. "7" (strips "007")
+          ; Read the actual displayed attribute value from the block
+          (setq att (entnext ent))
+          (while (and att (= "ATTRIB" (cdr (assoc 0 (setq att-data (entget att))))))
+            (if (= "XX" (cdr (assoc 2 att-data)))
+              (setq actual-val (cdr (assoc 1 att-data)))
+            )
+            (setq att (entnext att))
+          )
+          ; Unpadded if the attribute matches the raw string exactly; padded otherwise
+          (if actual-val
+            (setq *HN-Pad-Disp* (if (= actual-val raw-display) nil T))
+          )
+        )
+      )
+    )
+  )
+)
+
+(defun HN-SyncAllTags (/ ss i ent info doc)
+  "Rewrites every LAFX-TAG-SQUARE-999 display text to match current *HN-Pad-Disp* setting."
+  (vl-load-com)
+  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (vla-StartUndoMark doc)
+  (if (setq ss (ssget "_X" '((0 . "INSERT") (2 . "LAFX-TAG-SQUARE-999"))))
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq ent (ssname ss i))
+        (if (setq info (HN-GetTagInfo ent))
+          (UpdateTagNumber
+            ent
+            (atoi (nth 0 info)) (nth 1 info)
+            (atoi (nth 2 info)) (nth 3 info)
+          )
+        )
+        (setq i (1+ i))
+      )
+    )
+  )
+  (vla-EndUndoMark doc)
+  (princ (strcat "\nSync complete. Tags set to " (if *HN-Pad-Disp* "padded" "unpadded") " format."))
+)
 
 ;;; --- DICTIONARY MANAGEMENT ---
 
@@ -125,44 +187,44 @@
   "Renumber all tags >= start-num by incrementing by 1"
   (setq tags-to-renumber '())
   (setq highest-num 0)
-  
+
   ; Get all tags for this hole/location
   (setq tags-to-renumber (GetAllHeadTags hole location))
-  
+
   ; Filter for tags >= start-num
-  (setq tags-to-renumber 
+  (setq tags-to-renumber
     (vl-remove-if '(lambda (x) (< (cadr x) start-num)) tags-to-renumber)
   )
-  
+
   ; Sort by number (highest first to avoid conflicts)
   (setq tags-to-renumber (vl-sort tags-to-renumber '(lambda (a b) (> (cadr a) (cadr b)))))
-  
+
   (if tags-to-renumber
     (progn
       (princ (strcat "\nRenumbering " (itoa (length tags-to-renumber)) " tags..."))
-      
+
       (foreach tag tags-to-renumber
         (setq ent (car tag))
         (setq num (cadr tag))
         (setq new-num (1+ num))
-        
+
         ; Track highest number
         (if (> new-num highest-num)
           (setq highest-num new-num)
         )
-        
+
         ; Update the tag
         (UpdateTagNumber ent hole location new-num (GetHeadHandleFromTag ent))
-        
+
         (princ (strcat "\n  " (itoa num) " -> " (itoa new-num)))
       )
-      
+
       (princ (strcat "\nRenumbered " (itoa (length tags-to-renumber)) " tags."))
-      
+
       ; Update counter to new highest
       (SetCounter hole location highest-num)
       (princ (strcat "\nCounter updated to: " (itoa highest-num)))
-      
+
       T
     )
     nil
@@ -197,14 +259,14 @@
 
 (defun UpdateTagNumber (tag-ent hole location number head-handle / ent-data att-ent att-data new-text)
   "Update tag block's attribute and XDATA"
-  
-  ; Format the display text with padded hole number
+
+  ; Format the display text using current *HN-Pad-Disp* setting
   (setq new-text (strcat (FormatHoleNumber hole) location (FormatNumber number)))
-  
+
   ; Update attribute
   (setq ent-data (entget tag-ent))
   (setq att-ent (entnext tag-ent))
-  
+
   (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (setq att-data (entget att-ent))))))
     (if (= "XX" (cdr (assoc 2 att-data)))
       (progn
@@ -214,25 +276,27 @@
     )
     (setq att-ent (entnext att-ent))
   )
-  
+
   ; Update HEADNUM and LandFX XDATA
+  ; NOTE: XDATA stores raw integers (itoa) — not padded strings.
+  ;       FormatHoleNumber/FormatNumber are applied only at display time.
   (regapp "HEADNUM")
   (regapp "LandFX")
-  
+
   (setq ent-data (entget tag-ent '("HEADNUM" "LandFX")))
-  
+
   ; Remove existing XDATA
   (setq ent-data (vl-remove-if '(lambda (x) (= (car x) -3)) ent-data))
-  
-  ; Build HEADNUM and LandFX XDATA
-  (setq ent-data 
-    (append ent-data 
-      (list 
-        (list -3 
+
+  ; Build HEADNUM and LandFX XDATA with raw integer strings
+  (setq ent-data
+    (append ent-data
+      (list
+        (list -3
           (list "HEADNUM"
-            (cons 1000 (itoa hole))
+            (cons 1000 (itoa hole))      ; raw hole integer, e.g. "1"
             (cons 1000 location)
-            (cons 1000 (FormatNumber number))
+            (cons 1000 (itoa number))    ; raw number integer, e.g. "7"
             (cons 1005 head-handle)
           )
           (list "LandFX"
@@ -243,10 +307,10 @@
       )
     )
   )
-  
+
   (entmod ent-data)
   (entupd tag-ent)
-  
+
   T
 )
 
@@ -385,7 +449,7 @@
 
 (defun CreateHeadTag (hole location number head-ent / old-attreq old-layer tag-ent att-ent att-data ent-data xdata-list)
   "Create a new LAFX-TAG-SQUARE-999 block - INSERT pauses for user to place it"
-  
+
   ; Verify block exists
   (if (not (tblsearch "BLOCK" "LAFX-TAG-SQUARE-999"))
     (progn
@@ -393,7 +457,7 @@
       (exit)
     )
   )
-  
+
   ; Verify layer exists
   (if (not (tblsearch "LAYER" "LI-VALV-ANNO"))
     (progn
@@ -401,31 +465,31 @@
       (exit)
     )
   )
-  
+
   ; Save current layer and switch to LI-VALV-ANNO
   (setq old-layer (getvar "CLAYER"))
   (setvar "CLAYER" "LI-VALV-ANNO")
-  
+
   ; Save and disable attribute prompting
   (setq old-attreq (getvar "ATTREQ"))
   (setvar "ATTREQ" 0)
-  
+
   ; Insert block - PAUSE lets the user place it with native drag-on-cursor behavior
   (command "_.INSERT" "LAFX-TAG-SQUARE-999" pause "" "" "")
-  
+
   ; Restore settings
   (setvar "ATTREQ" old-attreq)
   (setvar "CLAYER" old-layer)
-  
+
   ; Get the inserted block
   (setq tag-ent (entlast))
-  
-  ; STEP 1: Update attribute value
+
+  ; STEP 1: Update attribute value using current display padding setting
   (setq att-ent (entnext tag-ent))
   (while (and att-ent (= "ATTRIB" (cdr (assoc 0 (setq att-data (entget att-ent))))))
     (if (= "XX" (cdr (assoc 2 att-data)))
       (progn
-        (entmod (subst 
+        (entmod (subst
           (cons 1 (strcat (FormatHoleNumber hole) location (FormatNumber number)))
           (assoc 1 att-data)
           att-data
@@ -435,31 +499,32 @@
     )
     (setq att-ent (entnext att-ent))
   )
-  
+
   ; Force AutoCAD to commit attribute changes before touching XDATA
   (entupd tag-ent)
-  
+
   ; STEP 2: Write XDATA - fresh entget AFTER attribute is committed
+  ; NOTE: Store raw integers in XDATA, not padded strings.
   (regapp "HEADNUM")
   (regapp "LandFX")
-  
+
   (setq head-handle (cdr (assoc 5 (entget head-ent))))
-  
+
   ; Get fresh entity data (no stale attribute state)
   (setq ent-data (entget tag-ent '("HEADNUM" "LandFX")))
-  
+
   ; Strip any existing XDATA
   (setq ent-data (vl-remove-if '(lambda (x) (= (car x) -3)) ent-data))
-  
-  ; Append HEADNUM and LandFX XDATA to tag block
-  (setq ent-data 
-    (append ent-data 
-      (list 
-        (list -3 
+
+  ; Append HEADNUM and LandFX XDATA to tag block with raw integer strings
+  (setq ent-data
+    (append ent-data
+      (list
+        (list -3
           (list "HEADNUM"
-            (cons 1000 (itoa hole))
+            (cons 1000 (itoa hole))      ; raw hole integer, e.g. "1"
             (cons 1000 location)
-            (cons 1000 (FormatNumber number))
+            (cons 1000 (itoa number))    ; raw number integer, e.g. "7"
             (cons 1005 head-handle)
           )
           (list "LandFX"
@@ -470,13 +535,13 @@
       )
     )
   )
-  
+
   (entmod ent-data)
   (entupd tag-ent)
-  
+
   ; Get tag handle now that it's committed
   (setq tag-handle (cdr (assoc 5 (entget tag-ent))))
-  
+
   ; Write 1005 back-reference to head block's LandFX XDATA
   ; Surgically remove only: nil (dead) references and existing LAFX-TAG* callouts
   ; Preserve everything else: pipes, arcs, circles, unknown types
@@ -485,8 +550,8 @@
     (progn
       (setq clean-lfx-app
         (cons (car (cadr lfx-xdata))  ; preserve app name "LandFX"
-          (vl-remove-if 
-            '(lambda (x) 
+          (vl-remove-if
+            '(lambda (x)
                (and (= (car x) 1005)
                  (or
                    ; Remove dead references
@@ -505,7 +570,7 @@
       )
       ; Append our fresh 1005
       (setq clean-lfx-app (append clean-lfx-app (list (cons 1005 tag-handle))))
-      
+
       ; Write back
       (setq head-data
         (subst
@@ -518,7 +583,7 @@
       (entupd head-ent)
     )
   )
-  
+
   tag-ent
 )
 
@@ -531,13 +596,31 @@
 )
 
 (defun FormatHoleNumber (n)
-  (if (< n 10) (strcat "0" (itoa n)) (itoa n))
+  "Format hole number for drawing display, respecting *HN-Pad-Disp*."
+  (if (and *HN-Pad-Disp* (< n 10)) (strcat "0" (itoa n)) (itoa n))
 )
 
 (defun FormatNumber (n)
-  (cond ((< n 10)  (strcat "00" (itoa n)))
-        ((< n 100) (strcat "0"  (itoa n)))
-        (T         (itoa n)))
+  "Format head number for drawing display, respecting *HN-Pad-Disp*."
+  (if *HN-Pad-Disp*
+    (cond ((< n 10)  (strcat "00" (itoa n)))
+          ((< n 100) (strcat "0"  (itoa n)))
+          (T         (itoa n)))
+    (itoa n))
+)
+
+(defun FormatHoleNumberExport (n)
+  "Format hole number for CSV export, respecting *HN-Pad-Export*."
+  (if (and *HN-Pad-Export* (< n 10)) (strcat "0" (itoa n)) (itoa n))
+)
+
+(defun FormatNumberExport (n)
+  "Format head number for CSV export, respecting *HN-Pad-Export*."
+  (if *HN-Pad-Export*
+    (cond ((< n 10)  (strcat "00" (itoa n)))
+          ((< n 100) (strcat "0"  (itoa n)))
+          (T         (itoa n)))
+    (itoa n))
 )
 
 ;;; --- SHARED HELPERS ---
@@ -549,7 +632,8 @@
 
 (defun HN-GetTagInfo (tag-ent / xd xd-inner)
   "Extract HEADNUM XDATA from a tag block.
-   Returns (hole-str loc-str num-str head-handle) or nil."
+   Returns (hole-str loc-str num-str head-handle) or nil.
+   NOTE: num-str may be raw ('7') or padded ('007') depending on when tag was created."
   (if (and tag-ent
            (setq xd (assoc -3 (entget tag-ent '("HEADNUM"))))
            (setq xd-inner (cdr (assoc "HEADNUM" (cdr xd))))
@@ -557,7 +641,7 @@
     (list
       (cdr (nth 0 xd-inner))  ; hole as string e.g. "1"
       (cdr (nth 1 xd-inner))  ; location e.g. "FW"
-      (cdr (nth 2 xd-inner))  ; number e.g. "007"
+      (cdr (nth 2 xd-inner))  ; number as string e.g. "7" (or legacy "007")
       (cdr (nth 3 xd-inner))  ; 1005 head handle
     )
     nil
@@ -661,7 +745,7 @@
 )
 
 (defun HN-RefreshStatus (hole location / tags nums max-num gap-count next-num)
-  "Update gap_label and next_label from actual tags in the drawing (ignores stored counter)."
+  "Update gap_label and override_num from actual tags in the drawing (ignores stored counter)."
   (setq tags (GetAllHeadTags hole location))
   (if (null tags)
     (progn
@@ -853,7 +937,8 @@
                            ss i ent ent-data
                            u-tagged-h u-ss u-i u-ent u-data u-vals
                            u-handle u-tag-ss u-j u-tag-ent u-hh)
-  "Export PNEZD CSVs for selected hole/location combos; include-valves=T also writes VALVES.csv"
+  "Export PNEZD CSVs for selected hole/location combos; include-valves=T also writes VALVES.csv.
+   Point numbers use *HN-Pad-Export* for padding (independent of drawing display setting)."
   (setq dwg-folder    output-folder)
   (setq dwg-name      (vl-filename-base (getvar "DWGNAME")))
   (setq written-count 0)
@@ -951,8 +1036,10 @@
                   (setq E-str    (rtos (car  head-pos) 2 4))
                   (setq N-str    (rtos (cadr head-pos) 2 4))
                   (setq desc-str (GetHeadDescStr head-ent))
+                  ; Use export-specific format functions (respects *HN-Pad-Export*)
                   (setq rows (append rows
-                    (list (list (strcat (FormatHoleNumber hole) loc (FormatNumber num)) N-str E-str "0" desc-str))
+                    (list (list (strcat (FormatHoleNumberExport hole) loc (FormatNumberExport num))
+                                N-str E-str "0" desc-str))
                   ))
                 )
               )
@@ -1021,6 +1108,28 @@
   )
 )
 
+(defun HN-YesNo (msg / shell result)
+  "Show a Windows Yes/No popup dialog. Returns T if user clicked Yes, nil for No."
+  (vl-load-com)
+  (setq shell (vlax-create-object "WScript.Shell"))
+  (if (not shell)
+    nil
+    (progn
+      (setq result
+        (vl-catch-all-apply
+          'vlax-invoke-method
+          (list shell 'Popup msg 0 "Head Numbering" 4)  ; 4 = Yes/No buttons
+        )
+      )
+      (vlax-release-object shell)
+      (if (vl-catch-all-error-p result)
+        nil
+        (= result 6)  ; 6 = Yes, 7 = No
+      )
+    )
+  )
+)
+
 (defun HN-BrowseForFolder (prompt default-path / shell folder self-obj path)
   "Show Windows Shell folder browser dialog. Returns selected path with trailing \\ or nil."
   (vl-load-com)
@@ -1065,8 +1174,8 @@
   (setq combo-count (length export-combos))
   (setq combo-items (HN-BuildComboItems export-combos))
 
-  ; Load and show sub-dialog
-  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
+  ; Load and show sub-dialog (CB version)
+  (setq dcl-path (cond ((findfile "HeadNumbering CB.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering CB.dcl"))))
   (setq dcl_id (load_dialog dcl-path))
   (if (not (new_dialog "HeadExportDialog" dcl_id))
     (progn
@@ -1085,6 +1194,8 @@
   (end_list)
   (set_tile "export_list" (MakeSelectAllStr combo-count))
   (set_tile "include_valves" "1")
+  ; Reflect current global export padding preference
+  (set_tile "export_padding" (if *HN-Pad-Export* "1" "0"))
   (set_tile "output_folder" output-folder)
   ; Enable Fix Gaps button only when at least one combo has gaps
   (mode_tile "fix_gaps_btn"
@@ -1140,6 +1251,7 @@
     "(setq sel-str        (get_tile \"export_list\"))
      (setq include-valves (get_tile \"include_valves\"))
      (setq output-folder  (get_tile \"output_folder\"))
+     (setq *HN-Pad-Export* (= (get_tile \"export_padding\") \"1\"))
      (if (and output-folder
               (/= output-folder \"\")
               (/= (substr output-folder (strlen output-folder)) \"\\\\\"))
@@ -1201,17 +1313,30 @@
   )
 )
 
+;;; --- SETTINGS DIALOG HELPER ---
+
+(defun HN-ParseChosenNum (s loc-idx / loc-str loc-pos)
+  "Parse a chosen-num string (e.g. '01FW007' or '1FW7' or '7') and return the integer number.
+   Works correctly for both padded and unpadded formats."
+  (setq loc-str (nth loc-idx *HN-Locations*)
+        loc-pos (vl-string-search loc-str s))
+  (if loc-pos
+    (atoi (substr s (+ loc-pos (strlen loc-str) 1)))
+    (atoi s)
+  )
+)
+
 (defun ShowSettingsDialog (current-hole current-location / dcl-path dcl_id hole-choice location-choice
                             result list-items selected-idx chosen-num tag-ent head-ent auto-num)
   "Display DCL dialog and return (hole location override-number)"
 
   (if (null *HN-DIR*)
     (progn
-      (alert "Cannot find Head Numbering.lsp\nAdd the TCLLC Numbering folder to:\nOptions > Files > Support File Search Path")
+      (alert "Cannot find Head Numbering CB.lsp\nAdd the TCLLC Numbering folder to:\nOptions > Files > Support File Search Path")
       (exit)
     )
   )
-  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
+  (setq dcl-path (cond ((findfile "HeadNumbering CB.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering CB.dcl"))))
   ; Initialize state before loop - these persist across zoom re-opens
   (setq hole-choice     (if current-hole     (itoa (1- current-hole)) "0")
         location-choice (if current-location (itoa (vl-position current-location *HN-Locations*)) "0")
@@ -1232,6 +1357,8 @@
     ; Restore state
     (set_tile "hole_list"     hole-choice)
     (set_tile "location_list" location-choice)
+    ; Reflect current padding setting on the toggle
+    (set_tile "use_padding" (if *HN-Pad-Disp* "1" "0"))
     (setq list-items (RefreshTagList (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*)))
     (HN-RefreshStatus          (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*))
     (setq auto-num (get_tile "override_num"))
@@ -1294,6 +1421,14 @@
              chosen-num (get_tile \"override_num\"))
        (done_dialog 4)"
     )
+    ; Padding toggle — capture state, update global, dismiss with code 5 to sync outside dialog
+    (action_tile "use_padding"
+      "(setq hole-choice (get_tile \"hole_list\")
+             location-choice (get_tile \"location_list\")
+             chosen-num (get_tile \"override_num\")
+             *HN-Pad-Disp* (= $value \"1\"))
+       (done_dialog 5)"
+    )
     (action_tile "export_btn" "(HN-RunExportDialog)")
     ; Find buttons: capture state then dismiss with zoom codes 2/3
     (action_tile "find_tag_btn"
@@ -1338,6 +1473,21 @@
         (setq selected-idx -1)
         T
       )
+      ((= result 5)  ; Padding toggle - confirm before syncing
+        (if (HN-YesNo
+              (strcat
+                "This will update ALL existing tag numbers in the drawing\n"
+                "to " (if *HN-Pad-Disp* "PADDED (e.g. 01FW007)" "UNPADDED (e.g. 1FW7)") " format.\n\n"
+                "Proceed?  (Ctrl+Z will undo if needed)"))
+          (progn
+            (HN-SyncAllTags)
+            (command "_.REDRAW")
+            (setq chosen-num "")  ; clear stale format so Next No. refreshes in new format
+          )
+          (setq *HN-Pad-Disp* (not *HN-Pad-Disp*))  ; user said No — revert global
+        )
+        T
+      )
       (T nil)  ; OK (1) or Cancel (0) - exit loop
     )
   ))
@@ -1346,11 +1496,8 @@
     (list
       (1+ (atoi hole-choice))
       (nth (atoi location-choice) *HN-Locations*)
-      ; chosen-num is "01FW022" (full) or just "022" if user typed digits only
-      (if (>= (strlen chosen-num) 5)
-        (atoi (substr chosen-num 5))
-        (atoi chosen-num)
-      )
+      ; Parse number from chosen-num regardless of padded/unpadded format
+      (HN-ParseChosenNum chosen-num (atoi location-choice))
     )
     nil
   )
@@ -1362,9 +1509,12 @@
                         head-ent head-handle head-pt tag-ent place-pt existing-tag
                         user-input parent-list response highest collision-response done
                         sel-ent sel-type)
-  
-  (princ "\n=== HEAD NUMBERING ROUTINE ===")
-  
+
+  (princ "\n=== HEAD NUMBERING ROUTINE (CB) ===")
+
+  ; Auto-detect padding format from existing tags in drawing
+  (HN-AutoDetectPadding)
+
   ; Show settings dialog - pre-populate with last used hole/location if available
   (if (not (setq settings (ShowSettingsDialog *HN-LastHole* *HN-LastLocation*)))
     (progn
@@ -1377,27 +1527,27 @@
   (setq current-location (cadr settings))
   (setq *HN-LastHole*     current-hole)
   (setq *HN-LastLocation* current-location)
-  
+
   ; Check if any tags exist for this hole/location
   (setq existing-tags (GetAllHeadTags current-hole current-location))
-  
+
   (if (null existing-tags)
     (progn
       (SetCounter current-hole current-location 0)
-      (princ "\nNo existing tags found, starting from 001.")
+      (princ "\nNo existing tags found, starting from 1.")
     )
   )
-  
+
   (setq current-number (caddr settings))
-  
+
   (princ (strcat "\nHole: " (itoa current-hole) " | Location: " current-location))
   (princ (strcat "\nNext number: " (FormatHoleNumber current-hole) current-location (FormatNumber current-number)))
-  
+
   (setq done nil)
-  
+
   ; Main loop
   (while (not done)
-    
+
     ; Prompt for head selection
     (princ (strcat "\nCurrent: " (FormatHoleNumber current-hole) current-location " [Next: " (FormatNumber current-number) "]"))
     (initget "Change Manual Toggle")
@@ -1424,13 +1574,13 @@
           (princ "\nCancelled.")
         )
       )
-      
+
       ; User selected something
       (user-input
         ; nentsel returns: (entity pick-point) for top-level blocks
         ;              or: (entity pick-point matrix parent-list) for nested
         (setq sel-ent (car user-input))
-        
+
         ; If nested, resolve to top-level parent
         (if (= (length user-input) 4)
           (progn
@@ -1440,10 +1590,10 @@
             )
           )
         )
-        
+
         ; Classify what was clicked
         (setq sel-type (ClassifySelection sel-ent))
-        
+
         (cond
           ; -------------------------------------------------------
           ; Clicked our own tag - go straight to renumber prompt
@@ -1492,14 +1642,14 @@
               )
             )
           )
-          
+
           ; -------------------------------------------------------
           ; Clicked a LandFX tag - warn and skip
           ; -------------------------------------------------------
           ((= sel-type 'LFXTAG)
             (princ "\nThat is a Land F/X tag, not a head or your tag. Please try again.")
           )
-          
+
           ; -------------------------------------------------------
           ; Clicked something unknown (tree, shrub, etc)
           ; -------------------------------------------------------
@@ -1508,25 +1658,25 @@
           )
         )
       )
-      
+
       ; User pressed Enter/Esc
       (T
         (setq done T)
       )
     )
   )
-  
+
   (princ "\n=== NUMBERING COMPLETE ===")
   (princ)
 )
 
-(princ "\n=== HEAD NUMBERING ROUTINE LOADED ===")
+(princ "\n=== HEAD NUMBERING ROUTINE (CB) LOADED ===")
 (princ "\nCommand: NUMBERHEADS")
+(princ "\nPadding: *HN-Pad-Disp* controls drawing display  |  *HN-Pad-Export* controls CSV")
 (princ "\nUtilities:")
 (princ "\n  FINDTAG            - Click a head to find and highlight its tag")
 (princ "\n  FINDHEAD           - Click a tag to find and highlight its linked head")
 (princ "\n  EXPORTHEADS        - Export head locations to PNEZD CSV per location")
-(princ "\nBlock required: LAFX-TAG-SQUARE-999 (with XX attribute)")
 (princ "\n==========================================\n")
 (princ)
 
@@ -1598,7 +1748,7 @@
                 (princ "\nNo tag found linked to this head.")
               )
             )
-            (princ "\nNo tag found linked to this head.")
+            (princ "\nNo LAFX-TAG blocks found in drawing.")
           )
         )
       )
@@ -1696,7 +1846,7 @@
 ;;;
 ;;; Output: [DwgName]_[Location].csv  and  [DwgName]_UNNUMBERED.csv
 ;;; Format: Point,Northing,Easting,Elevation,Description
-;;;   Point       = head number (e.g. 01FW007) or "" for unnumbered
+;;;   Point       = head number formatted per *HN-Pad-Export* setting
 ;;;   Northing    = Y (state plane)
 ;;;   Easting     = X (state plane)
 ;;;   Elevation   = 0
@@ -1731,7 +1881,7 @@
               (list (nth 3 tag-info)   ; [0] head handle (key for assoc)
                     (nth 0 tag-info)   ; [1] hole as string e.g. "1"
                     (nth 1 tag-info)   ; [2] location e.g. "FW"
-                    (nth 2 tag-info))  ; [3] number e.g. "007"
+                    (nth 2 tag-info))  ; [3] number e.g. "7" (or legacy "007")
               tag-map
             )
           )
@@ -1777,10 +1927,10 @@
 
         (if tag-info
           (progn
-            ; Numbered: build formatted point string and bucket by location
-            (setq pt-num     (strcat (FormatHoleNumber (atoi (cadr tag-info)))
+            ; Numbered: format point string using export padding setting
+            (setq pt-num     (strcat (FormatHoleNumberExport (atoi (cadr tag-info)))
                                      (caddr tag-info)
-                                     (cadddr tag-info)))
+                                     (FormatNumberExport (atoi (cadddr tag-info)))))
             (setq bucket-key (caddr tag-info))  ; location code e.g. "FW"
           )
           (progn
@@ -1878,4 +2028,3 @@
   )
   (princ)
 )
-

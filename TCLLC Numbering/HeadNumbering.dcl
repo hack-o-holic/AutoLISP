@@ -1,5 +1,7 @@
 // ========================================================================
-// HEAD NUMBERING DIALOG
+// HEAD NUMBERING DIALOG - CB VERSION
+// Adds: use_padding toggle in main dialog
+//       export_padding toggle in export dialog
 // ========================================================================
 
 HeadNumDialog : dialog {
@@ -21,6 +23,14 @@ HeadNumDialog : dialog {
         key = "location_list";
         width = 12;
       }
+    }
+  }
+
+  : row {
+    alignment = centered;
+    : toggle {
+      key = "use_padding";
+      label = "Use Leading Zeros (e.g., 01FW007)";
     }
   }
 
@@ -117,7 +127,8 @@ HeadNumDialog : dialog {
 }
 
 // ========================================================================
-// HEAD EXPORT DIALOG
+// HEAD EXPORT DIALOG - CB VERSION
+// Adds: export_padding toggle for independent CSV padding control
 // ========================================================================
 
 HeadExportDialog : dialog {
@@ -154,10 +165,17 @@ HeadExportDialog : dialog {
     }
   }
 
-  : toggle {
-    key = "include_valves";
-    label = "Include valves";
-    value = "1";
+  : column {
+    : toggle {
+      key = "export_padding";
+      label = "Pad numbers in CSV (for Excel sorting)";
+      value = "1";
+    }
+    : toggle {
+      key = "include_valves";
+      label = "Include valves";
+      value = "1";
+    }
   }
 
   : row {
@@ -193,7 +211,7 @@ HeadExportDialog : dialog {
 
     : button {
       key = "accept";
-      label = "Export Selected";
+      label = "Export";
       is_default = true;
       fixed_width = true;
       width = 14;
