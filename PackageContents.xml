@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0"
+                    ProductCode="{A7B3C921-D4E5-4F6A-8B9C-1A2B3C4D5E6F}"
+                    Name="TCLLC-Tools"
+                    Description="TCLLC Irrigation AutoCAD Tools">
+
+  <CompanyDetails Name="TCLLC" />
+
+  <RuntimeRequirements OS="Win64" Platform="AutoCAD" SeriesMin="R19.0" SeriesMax="*" />
+
+  <Components>
+    <ComponentEntry AppName="TCLLC-Tools"
+                    LoadOnCommandInvocation="False"
+                    LoadOnAutoCADStartup="True">
+      <RuntimeRequirements OS="Win64" Platform="AutoCAD" SeriesMin="R19.0" SeriesMax="*" />
+      <AssemblyFile Language="AutoLISP" TransformFile="./Contents/loader.lsp" />
+    </ComponentEntry>
+  </Components>
+
+</ApplicationPackage>

@@ -1,7 +1,5 @@
 // ========================================================================
-// HEAD NUMBERING DIALOG - CB VERSION
-// Adds: use_padding toggle in main dialog
-//       export_padding toggle in export dialog
+// HEAD NUMBERING DIALOG
 // ========================================================================
 
 HeadNumDialog : dialog {
@@ -127,8 +125,7 @@ HeadNumDialog : dialog {
 }
 
 // ========================================================================
-// HEAD EXPORT DIALOG - CB VERSION
-// Adds: export_padding toggle for independent CSV padding control
+// HEAD EXPORT DIALOG
 // ========================================================================
 
 HeadExportDialog : dialog {

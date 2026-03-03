@@ -1,5 +1,5 @@
 ;;; ========================================================================
-;;; HEAD NUMBERING ROUTINE - CB VERSION
+;;; HEAD NUMBERING ROUTINE
 ;;; ========================================================================
 ;;; Interactive head numbering with counter persistence and smart renumbering
 ;;;
@@ -21,8 +21,8 @@
 (setq *HN-MaxHole*       27)
 (setq *HN-DIR*
   (cond
-    ((findfile "Head Numbering CB.lsp") (vl-filename-directory (findfile "Head Numbering CB.lsp")))
-    ((findfile "HeadNumbering CB.dcl")  (vl-filename-directory (findfile "HeadNumbering CB.dcl")))
+    ((findfile "Head Numbering.lsp") (vl-filename-directory (findfile "Head Numbering.lsp")))
+    ((findfile "HeadNumbering.dcl")  (vl-filename-directory (findfile "HeadNumbering.dcl")))
     (T nil)))
 (if (not *HN-LastHole*)     (setq *HN-LastHole*     nil))
 (if (not *HN-LastLocation*) (setq *HN-LastLocation* nil))
@@ -1174,8 +1174,8 @@
   (setq combo-count (length export-combos))
   (setq combo-items (HN-BuildComboItems export-combos))
 
-  ; Load and show sub-dialog (CB version)
-  (setq dcl-path (cond ((findfile "HeadNumbering CB.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering CB.dcl"))))
+  ; Load and show sub-dialog
+  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
   (setq dcl_id (load_dialog dcl-path))
   (if (not (new_dialog "HeadExportDialog" dcl_id))
     (progn
@@ -1332,11 +1332,11 @@
 
   (if (null *HN-DIR*)
     (progn
-      (alert "Cannot find Head Numbering CB.lsp\nAdd the TCLLC Numbering folder to:\nOptions > Files > Support File Search Path")
+      (alert "Cannot find Head Numbering.lsp\nAdd the TCLLC Numbering folder to:\nOptions > Files > Support File Search Path")
       (exit)
     )
   )
-  (setq dcl-path (cond ((findfile "HeadNumbering CB.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering CB.dcl"))))
+  (setq dcl-path (cond ((findfile "HeadNumbering.dcl")) (T (strcat *HN-DIR* "\\" "HeadNumbering.dcl"))))
   ; Initialize state before loop - these persist across zoom re-opens
   (setq hole-choice     (if current-hole     (itoa (1- current-hole)) "0")
         location-choice (if current-location (itoa (vl-position current-location *HN-Locations*)) "0")
