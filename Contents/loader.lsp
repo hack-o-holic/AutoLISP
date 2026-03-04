@@ -5,6 +5,13 @@
 ;;; excluded — load manually from their source folders if needed.
 ;;; ========================================================================
 
+;;; Add Contents/ to support file search path so autoload can find LSP files
+(setq *TCLLC-DIR*
+  (strcat (getenv "APPDATA")
+          "\\Autodesk\\ApplicationPlugins\\TCLLC-Tools.bundle\\Contents\\"))
+(if (not (vl-string-search *TCLLC-DIR* (getenv "ACAD")))
+  (setenv "ACAD" (strcat *TCLLC-DIR* ";" (getenv "ACAD"))))
+
 (autoload "CHECKPIPES"      '("CHECKPIPES" "SETFIXTEMPLATE"))
 (autoload "CHECKVALVES"     '("CHECKVALVES" "CHECKVALVES-CLEAR"))
 (autoload "COUNTVALVES"     '("COUNTVALVES"))

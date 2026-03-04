@@ -1510,7 +1510,7 @@
                         user-input parent-list response highest collision-response done
                         sel-ent sel-type)
 
-  (princ "\n=== HEAD NUMBERING ROUTINE (CB) ===")
+  (princ "\n=== HEAD NUMBERING ROUTINE ===")
 
   ; Auto-detect padding format from existing tags in drawing
   (HN-AutoDetectPadding)
@@ -1670,7 +1670,7 @@
   (princ)
 )
 
-(princ "\n=== HEAD NUMBERING ROUTINE (CB) LOADED ===")
+(princ "\n=== HEAD NUMBERING ROUTINE LOADED ===")
 (princ "\nCommand: NUMBERHEADS")
 (princ "\nPadding: *HN-Pad-Disp* controls drawing display  |  *HN-Pad-Export* controls CSV")
 (princ "\nUtilities:")
