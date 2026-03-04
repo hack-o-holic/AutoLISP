@@ -3,7 +3,7 @@
 // ========================================================================
 
 HeadNumDialog : dialog {
-  label = "TCLLC Head Numbering";
+  label = "TCLLC - Head Numbering";
   initial_focus = "hole_list";
 
   : row {
@@ -129,7 +129,7 @@ HeadNumDialog : dialog {
 // ========================================================================
 
 HeadExportDialog : dialog {
-  label = "Export Heads";
+  label = "TCLLC - Export Heads";
 
   : text {
     label = "Select areas to export:";

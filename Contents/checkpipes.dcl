@@ -1,9 +1,9 @@
 // checkpipes.dcl
-// LandFX Check - Pipe XData dialog
+// TCLLC - Check Pipe XData dialog
 // Loaded by CHECKPIPES.lsp at runtime.
 
 checkpipes_dialog : dialog {
-  label = "LandFX Check - Pipe XData";
+  label = "TCLLC - Check Pipe XData";
 
   // ── Selection status box ──────────────────────────────────────────────
   : boxed_row {

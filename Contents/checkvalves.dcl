@@ -1,9 +1,9 @@
 // checkvalves.dcl
-// LandFX Check - Valve Connections dialog
+// TCLLC - Check Valve Connections dialog
 // Loaded by CHECKPIPES.lsp at runtime.
 
 checkvalves_dialog : dialog {
-  label = "LandFX Check - Valve Connections";
+  label = "TCLLC - Check Valve Connections";
 
   // ── Selected Geometry ─────────────────────────────────────────────────
   : row {
