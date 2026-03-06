@@ -28,6 +28,8 @@
 (if (not *HN-LastLocation*) (setq *HN-LastLocation* nil))
 (if (not *HN-Pad-Disp*)     (setq *HN-Pad-Disp*   T))  ; T = use leading zeros on drawing
 (if (not *HN-Pad-Export*)   (setq *HN-Pad-Export*  T))  ; T = use leading zeros in CSV
+(if (not *HN-Tag-Scale*)    (setq *HN-Tag-Scale*   1.0)); tag scale (default 100%)
+(if (not *HN-Block-Scale*)  (setq *HN-Block-Scale* 1.0)); tracks current block def scale
 
 ;;; --- SMART SYNC & AUTO-DETECT ---
 
@@ -1326,8 +1328,30 @@
   )
 )
 
+
+(defun HN-ScaleBlockDef (block-name ratio / doc blks blk mat)
+  "Scale all entities in block definition by ratio, then ATTSYNC to update placed instances."
+  (vl-load-com)
+  (setq doc  (vla-get-ActiveDocument (vlax-get-acad-object))
+        blks (vla-get-Blocks doc))
+  (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-item (list blks block-name))))
+    (progn
+      (setq blk (vla-item blks block-name))
+      (setq mat (vlax-tmatrix
+        (list (list ratio 0.0   0.0   0.0)
+              (list 0.0   ratio 0.0   0.0)
+              (list 0.0   0.0   ratio 0.0)
+              (list 0.0   0.0   0.0   1.0))))
+      (vlax-for ent blk
+        (vla-TransformBy ent mat))
+      (command "_.ATTSYNC" "_Name" block-name "")
+      (vla-Regen doc acAllViewports)
+    )
+  )
+)
+
 (defun ShowSettingsDialog (current-hole current-location / dcl-path dcl_id hole-choice location-choice
-                            result list-items selected-idx chosen-num tag-ent head-ent auto-num)
+                            result list-items selected-idx chosen-num tag-ent head-ent auto-num scale-choice)
   "Display DCL dialog and return (hole location override-number)"
 
   (if (null *HN-DIR*)
@@ -1341,7 +1365,13 @@
   (setq hole-choice     (if current-hole     (itoa (1- current-hole)) "0")
         location-choice (if current-location (itoa (vl-position current-location *HN-Locations*)) "0")
         selected-idx    -1
-        chosen-num      "")
+        chosen-num      ""
+        scale-choice    (cond ((= *HN-Tag-Scale* 0.5)  "0")
+                              ((= *HN-Tag-Scale* 0.75) "1")
+                              ((= *HN-Tag-Scale* 1.25) "3")
+                              ((= *HN-Tag-Scale* 1.5)  "4")
+                              (T                        "2"))  ; default 1.00
+  )
 
   ; While loop: re-opens dialog after Find Tag/Head zoom (done_dialog 2/3), exits on OK/Cancel
   (while (progn
@@ -1353,10 +1383,12 @@
     ; Populate dropdowns
     (start_list "hole_list")     (mapcar 'add_list (mapcar 'itoa (MakeRange 1 *HN-MaxHole*))) (end_list)
     (start_list "location_list") (mapcar 'add_list *HN-Locations*)                            (end_list)
+    (start_list "scale_list")    (mapcar 'add_list '("0.50" "0.75" "1.00" "1.25" "1.50")) (end_list)
 
     ; Restore state
     (set_tile "hole_list"     hole-choice)
     (set_tile "location_list" location-choice)
+    (set_tile "scale_list"    scale-choice)
     ; Reflect current padding setting on the toggle
     (set_tile "use_padding" (if *HN-Pad-Disp* "1" "0"))
     (setq list-items (RefreshTagList (1+ (atoi hole-choice)) (nth (atoi location-choice) *HN-Locations*)))
@@ -1418,7 +1450,8 @@
     (action_tile "fill_gaps_btn"
       "(setq hole-choice (get_tile \"hole_list\")
              location-choice (get_tile \"location_list\")
-             chosen-num (get_tile \"override_num\"))
+             chosen-num (get_tile \"override_num\")
+             scale-choice (get_tile \"scale_list\"))
        (done_dialog 4)"
     )
     ; Padding toggle — capture state, update global, dismiss with code 5 to sync outside dialog
@@ -1434,19 +1467,22 @@
     (action_tile "find_tag_btn"
       "(setq hole-choice (get_tile \"hole_list\")
              location-choice (get_tile \"location_list\")
-             chosen-num (get_tile \"override_num\"))
+             chosen-num (get_tile \"override_num\")
+             scale-choice (get_tile \"scale_list\"))
        (done_dialog 2)"
     )
     (action_tile "find_head_btn"
       "(setq hole-choice (get_tile \"hole_list\")
              location-choice (get_tile \"location_list\")
-             chosen-num (get_tile \"override_num\"))
+             chosen-num (get_tile \"override_num\")
+             scale-choice (get_tile \"scale_list\"))
        (done_dialog 3)"
     )
     (action_tile "accept"
       "(setq hole-choice (get_tile \"hole_list\")
              location-choice (get_tile \"location_list\")
-             chosen-num (get_tile \"override_num\"))
+             chosen-num (get_tile \"override_num\")
+             scale-choice (get_tile \"scale_list\"))
        (done_dialog 1)"
     )
     (action_tile "cancel" "(done_dialog 0)")
@@ -1491,6 +1527,16 @@
       (T nil)  ; OK (1) or Cancel (0) - exit loop
     )
   ))
+
+
+  ; Update scale global and rescale block definition if changed
+  (setq *HN-Tag-Scale* (nth (atoi scale-choice) '(0.5 0.75 1.0 1.25 1.5)))
+  (if (/= *HN-Tag-Scale* *HN-Block-Scale*)
+    (progn
+      (HN-ScaleBlockDef "LAFX-TAG-SQUARE-999" (/ *HN-Tag-Scale* *HN-Block-Scale*))
+      (setq *HN-Block-Scale* *HN-Tag-Scale*)
+    )
+  )
 
   (if (= result 1)
     (list

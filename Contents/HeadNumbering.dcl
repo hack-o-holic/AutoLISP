@@ -32,6 +32,22 @@ HeadNumDialog : dialog {
     }
   }
 
+  : row {
+    alignment = centered;
+    fixed_width = true;
+    : text {
+      label = "Tag Scale:";
+      fixed_width = true;
+      width = 10;
+    }
+    : popup_list {
+      key = "scale_list";
+      fixed_width = true;
+      width = 8;
+    }
+  }
+
+
   : boxed_column {
     label = "Already placed:";
 
